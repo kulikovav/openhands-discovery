@@ -29,6 +29,7 @@ from .runs import (
     merge_runs,
     newest_automations,
     read_run_pages,
+    resolve_run_conversations,
     run_conversation_ids,
     select_scan,
 )
@@ -159,7 +160,7 @@ async def list_automation_runs(
     """
     config: DiscoveryConfig = request.app.state.config
     base_url = f"http://127.0.0.1:{config.ingress_port}"
-    scan = select_scan(limit, has_conversation, run_id)
+    scan = select_scan(limit, has_conversation, run_id, status)
     runs: list[dict] = []
     status_counts: dict[str, int] = {}
     unavailable: list[UnavailableAutomation] = []
@@ -173,13 +174,45 @@ async def list_automation_runs(
                     AUTOMATION_SCAN_LIMIT,
                 )
             read_result = await read_run_pages(client, base_url, api_key, automations, scan)
-            runs, status_counts = merge_runs(read_result.pages, limit, status)
+            # A chat page keeps every candidate row until the id lookup runs,
+            # because a failed run can own a conversation while its record
+            # holds no conversation id. The caller's limit applies after the
+            # lookup. A plain run table still cuts at the requested limit.
+            candidate_limit = limit
+            if has_conversation:
+                candidate_limit = max(limit, sum(len(page.runs) for _, page in read_result.pages))
+            runs, status_counts = merge_runs(read_result.pages, candidate_limit, status)
             unavailable = read_result.unavailable
             if runs and (has_conversation or run_id):
                 records_port = config.runs_port or config.ingress_port
+                runs_base_url = f"http://127.0.0.1:{records_port}"
+                unresolved = [
+                    str(run.get("id", "") or "")
+                    for run in runs
+                    if not str(run.get("conversation_id", "") or "")
+                ]
+                if unresolved:
+                    resolved = await resolve_run_conversations(
+                        client,
+                        runs_base_url,
+                        base_url,
+                        api_key,
+                        unresolved,
+                    )
+                    for run in runs:
+                        if str(run.get("conversation_id", "") or ""):
+                            continue
+                        row_run_id = str(run.get("id", "") or "")
+                        if conversation_id := resolved.get(row_run_id):
+                            run["conversation_id"] = conversation_id
+                if has_conversation:
+                    # A run with no resolvable conversation has no chat to
+                    # open, so the chat page drops it after the lookup.
+                    runs = [run for run in runs if str(run.get("conversation_id", "") or "")]
+                    runs = runs[:limit]
                 records = await fetch_run_conversation_records(
                     client,
-                    f"http://127.0.0.1:{records_port}",
+                    runs_base_url,
                     base_url,
                     api_key,
                     run_conversation_ids(runs),

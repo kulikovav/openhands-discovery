@@ -14,14 +14,28 @@ from typing import Any, Protocol
 
 import httpx
 
+from .conversations import CONVERSATION_PAGE_SIZE
 from .models import UnavailableAutomation, text_tags
 from .upstream import API_KEY_HEADER, fetch_json
 
 AUTOMATIONS_PATH = "/api/automation/v1"
 CONVERSATION_RECORDS_PATH = "/api/conversations"
+CONVERSATION_SEARCH_PATH = "/api/conversations/search"
+# AUTOMATION_RUN_TAG is the conversation tag the deployment writes for an
+# automation run. It links a run to its conversation when the run record holds
+# no conversation id.
+AUTOMATION_RUN_TAG = "automationrunid"
 MERGED_RUN_LIMIT = 100
 RUN_PAGE_SIZE = 100
 CONVERSATION_RECORD_BATCH_SIZE = 40
+# The conversation lookup follows this many search pages per backend at most.
+# It serves a run whose record lost the conversation id, so the bound keeps a
+# long-lived deployment from turning one chat list read into a full scan.
+RUN_CONVERSATION_PAGE_LIMIT = 20
+# A failed or cancelled run can own a conversation the deployment did not link
+# back to the run. A completed run is not a candidate: a scheduled check that
+# completed without work never created a conversation.
+LOST_CONVERSATION_STATUSES = frozenset({"FAILED", "CANCELLED"})
 # A chat scan and a run lookup follow this many run pages per automation at
 # most, so one request stays bounded. The runs that own a conversation are rare
 # among the checks of a scheduled automation, and a run below its newest page
@@ -93,9 +107,13 @@ class ChatRuns:
     the offset pages until it collected ``limit`` matching rows, the automation
     ended, or the page bound is reached. The status counters come from the first
     page, like the unfiltered read.
+
+    ``status`` narrows which confirmed chat stops the scan, so a filtered chat
+    page does not under-fill when matching chats sit below the newest page.
     """
 
     limit: int
+    status: str | None = None
 
     async def read_page(
         self,
@@ -113,9 +131,12 @@ class ChatRuns:
                 status_counts = page.status_counts
             if not page.runs:
                 break
-            collected.extend(conversation_runs(page.runs))
+            collected.extend(chat_run_candidates(page.runs))
             offset += len(page.runs)
-            if len(collected) >= self.limit:
+            # Only a run that already carries its conversation id is a known
+            # chat. A candidate stays in the page for the id lookup, but it
+            # must not stop the scan before the requested number of chats.
+            if sum(1 for run in collected if chat_is_confirmed(run, self.status)) >= self.limit:
                 break
             if page.total is not None and offset >= page.total:
                 break
@@ -153,7 +174,9 @@ class SingleRun:
         return AutomationRunsPage(runs=[])
 
 
-def select_scan(limit: int, has_conversation: bool, run_id: str | None) -> RunScan:
+def select_scan(
+    limit: int, has_conversation: bool, run_id: str | None, status: str | None = None
+) -> RunScan:
     """Choose the scan strategy of one request.
 
     The route accepts both selectors, and ``run_id`` wins: a caller that asks
@@ -162,7 +185,7 @@ def select_scan(limit: int, has_conversation: bool, run_id: str | None) -> RunSc
     if run_id:
         return SingleRun(run_id)
     if has_conversation:
-        return ChatRuns(limit)
+        return ChatRuns(limit, status)
     return NewestRuns(min(limit, RUN_PAGE_SIZE))
 
 
@@ -309,9 +332,117 @@ def newest_automations(automations: list[dict[str, Any]], cap: int) -> list[dict
     return ordered[:cap]
 
 
-def conversation_runs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The runs of one page that own a conversation."""
-    return [run for run in rows if str(run.get("conversation_id", "") or "")]
+def chat_run_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The runs of one page that can own a chat.
+
+    A run with a conversation id owns one. A failed or cancelled run stays a
+    candidate because the deployment can create its conversation and lose the
+    id before it records the run result. A completed no-op run stays out: a
+    scheduled check that completed without work created no conversation.
+    """
+    return [
+        run
+        for run in rows
+        if str(run.get("conversation_id", "") or "")
+        or str(run.get("status", "") or "").upper() in LOST_CONVERSATION_STATUSES
+    ]
+
+
+def chat_is_confirmed(run: dict[str, Any], status: str | None) -> bool:
+    """Report whether a run is a known chat for the requested status filter."""
+    if not str(run.get("conversation_id", "") or ""):
+        return False
+    return not status or str(run.get("status", "") or "") == status
+
+
+def conversation_run_id(conversation: dict[str, Any]) -> str:
+    """The run id a conversation records, from its tag or its run workspace.
+
+    The deployment tags every automation conversation with ``automationrunid``.
+    The run workspace is the documented fallback
+    ``.../workspaces/automation-runs/<run_id>``, so a conversation that lost
+    the tag still resolves.
+    """
+    tags = conversation.get("tags")
+    if isinstance(tags, dict):
+        run_id = str(tags.get(AUTOMATION_RUN_TAG, "") or "")
+        if run_id:
+            return run_id
+    workspace = conversation.get("workspace")
+    if isinstance(workspace, dict):
+        working_dir = str(workspace.get("working_dir", "") or "").rstrip("/")
+        marker = "/automation-runs/"
+        if marker in working_dir:
+            return working_dir.rsplit(marker, 1)[1].split("/", 1)[0]
+    return ""
+
+
+async def resolve_run_conversations(
+    client: httpx.AsyncClient,
+    runs_base_url: str,
+    ingress_base_url: str,
+    api_key: str,
+    run_ids: list[str],
+) -> dict[str, str]:
+    """Resolve the conversation of each run whose record lost the id.
+
+    The deployment answers no lookup by run id, so the read walks the
+    conversation search newest first and matches the ``automationrunid`` tag or
+    the run workspace. The runs server owns the conversations automation runs
+    create; the ingress covers an older conversation that server does not
+    hold. The walk is bounded per backend, so a run with no conversation costs
+    at most that bound and is then dropped by the caller.
+    """
+    wanted = {run_id for run_id in run_ids if run_id}
+    if not wanted:
+        return {}
+    resolved = await find_run_conversations(client, runs_base_url, api_key, wanted)
+    if len(resolved) < len(wanted) and runs_base_url != ingress_base_url:
+        missing = wanted - set(resolved)
+        resolved.update(await find_run_conversations(client, ingress_base_url, api_key, missing))
+    return resolved
+
+
+async def find_run_conversations(
+    client: httpx.AsyncClient,
+    base_url: str,
+    api_key: str,
+    run_ids: set[str],
+) -> dict[str, str]:
+    """Find the conversations of the given runs on one backend."""
+    if not run_ids:
+        return {}
+    resolved: dict[str, str] = {}
+    page_id = ""
+    for _ in range(RUN_CONVERSATION_PAGE_LIMIT):
+        params: dict[str, Any] = {"limit": CONVERSATION_PAGE_SIZE}
+        if page_id:
+            params["page_id"] = page_id
+        try:
+            payload = await fetch_json(client, f"{base_url}{CONVERSATION_SEARCH_PATH}", api_key, params)
+        except (httpx.HTTPError, ValueError):
+            # The id lookup is a repair beside the run page, not a source of
+            # it: a search that fails leaves the rows the run read already
+            # proved, and the caller drops only the unresolved candidates.
+            break
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            break
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            run_id = conversation_run_id(item)
+            if run_id not in run_ids or run_id in resolved:
+                continue
+            conversation_id = str(item.get("id", "") or "")
+            if conversation_id:
+                resolved[run_id] = conversation_id
+        if len(resolved) == len(run_ids):
+            break
+        page_id = str(payload.get("next_page_id", "") or "")
+        if not page_id:
+            break
+    return resolved
 
 
 def run_by_id(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, Any]]:

@@ -3,6 +3,7 @@ import asyncio
 import httpx
 
 from openhands_discovery.runs import (
+    AUTOMATION_RUN_TAG,
     RUN_PAGE_SIZE,
     RUN_SCAN_PAGE_LIMIT,
     AutomationRunsPage,
@@ -10,12 +11,15 @@ from openhands_discovery.runs import (
     NewestRuns,
     SingleRun,
     apply_conversation_records,
-    conversation_runs,
+    chat_run_candidates,
+    conversation_run_id,
     fetch_conversation_records,
     fetch_run_conversation_records,
+    find_run_conversations,
     merge_runs,
     newest_automations,
     read_run_pages,
+    resolve_run_conversations,
     run_by_id,
     run_conversation_ids,
     select_scan,
@@ -61,6 +65,44 @@ def test_select_scan_prefers_the_run_lookup():
     assert isinstance(select_scan(5, True, None), ChatRuns)
     assert isinstance(select_scan(5, True, "r1"), SingleRun)
     assert select_scan(5, True, "r1").run_id == "r1"
+    assert select_scan(5, True, None, "FAILED").status == "FAILED"
+
+
+def test_chat_runs_counts_only_the_requested_status_as_a_stop():
+    offsets = []
+
+    def handler(request):
+        offset = int(request.url.params["offset"])
+        offsets.append(offset)
+        if offset == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "runs": [
+                        {"id": "r1", "conversation_id": "c1", "status": "COMPLETED"},
+                        {"id": "r2", "status": "FAILED"},
+                    ],
+                    "total": 3,
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "runs": [{"id": "r3", "conversation_id": "c3", "status": "FAILED"}],
+                "total": 3,
+            },
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ChatRuns(1, "FAILED").read_page(client, "http://127.0.0.1:8000", "key", "a1")
+
+    page = asyncio.run(run())
+
+    assert offsets == [0, 2]
+    assert [row["id"] for row in page.runs] == ["r1", "r2", "r3"]
 
 
 def test_chat_runs_follows_pages_until_the_limit():
@@ -199,14 +241,104 @@ def test_run_page_helpers_keep_only_rows_with_the_selected_shape():
         {"id": "r2", "conversation_id": "c2"},
         {"id": "r3", "conversation_id": ""},
         {"id": "r4", "conversation_id": "c4"},
+        {"id": "r5", "status": "FAILED"},
+        {"id": "r6", "status": "CANCELLED"},
+        {"id": "r7", "status": "FAILED", "conversation_id": "c7"},
     ]
 
-    assert [row["id"] for row in conversation_runs(rows)] == ["r2", "r4"]
-    assert conversation_runs([]) == []
+    assert [row["id"] for row in chat_run_candidates(rows)] == ["r2", "r4", "r5", "r6", "r7"]
+    assert chat_run_candidates([]) == []
     assert run_by_id(rows, "r2") == [rows[1]]
     assert run_by_id(rows, "missing") == []
-    assert run_conversation_ids(rows) == ["c2", "c4"]
+    assert run_conversation_ids(rows) == ["c2", "c4", "c7"]
     assert run_conversation_ids([{"conversation_id": "c2"}, {"conversation_id": "c2"}]) == ["c2"]
+
+
+def test_conversation_run_id_reads_the_tag_then_the_run_workspace():
+    assert conversation_run_id({"tags": {AUTOMATION_RUN_TAG: "r1"}}) == "r1"
+    assert (
+        conversation_run_id(
+            {"workspace": {"working_dir": "/home/openhands/.openhands/workspaces/automation-runs/r2/"}}
+        )
+        == "r2"
+    )
+    assert conversation_run_id({"workspace": {"working_dir": "/x/automation-runs/r3/repo"}}) == "r3"
+    assert conversation_run_id({"tags": {}}) == ""
+    assert conversation_run_id({"workspace": {"working_dir": "/tmp/work"}}) == ""
+    assert conversation_run_id({}) == ""
+
+
+def test_resolve_run_conversations_matches_tags_and_stops_when_found():
+    requests = []
+
+    def handler(request):
+        requests.append(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"id": "c1", "tags": {AUTOMATION_RUN_TAG: "r1"}},
+                    {"id": "c2", "workspace": {"working_dir": "/x/automation-runs/r2"}},
+                    {"id": "c3", "tags": {AUTOMATION_RUN_TAG: "other"}},
+                ],
+                "next_page_id": "next" if request.url.port == 8010 and not request.url.params.get("page_id") else None,
+            },
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await resolve_run_conversations(
+                client,
+                "http://127.0.0.1:8010",
+                "http://127.0.0.1:8000",
+                "key",
+                ["r1", "r2", "missing"],
+            )
+
+    resolved = asyncio.run(run())
+
+    assert resolved == {"r1": "c1", "r2": "c2"}
+    assert [str(url) for url in requests] == [
+        "http://127.0.0.1:8010/api/conversations/search?limit=100",
+        "http://127.0.0.1:8010/api/conversations/search?limit=100&page_id=next",
+        "http://127.0.0.1:8000/api/conversations/search?limit=100",
+    ]
+
+
+def test_find_run_conversations_stops_at_the_page_bound():
+    pages = []
+
+    def handler(request):
+        page_id = request.url.params.get("page_id", "")
+        pages.append(page_id)
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "c1", "tags": {}}], "next_page_id": f"p{len(pages)}"},
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"missing"})
+
+    assert asyncio.run(run()) == {}
+    assert len(pages) == 20
+
+
+def test_find_run_conversations_treats_a_failed_search_as_no_match():
+    requests = []
+
+    def handler(request):
+        requests.append(request.url)
+        return httpx.Response(500, request=request)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1"})
+
+    assert asyncio.run(run()) == {}
+    assert len(requests) == 1
 
 
 def test_apply_conversation_records_leaves_unanswered_rows_unset():

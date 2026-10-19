@@ -243,6 +243,148 @@ def test_runs_merges_rows_and_attaches_chat_state(tmp_path, monkeypatch):
     ]
 
 
+def test_runs_resolves_a_failed_run_whose_record_lost_the_conversation_id(tmp_path, monkeypatch):
+    automation = {"id": "a1", "name": "nightly"}
+    page = AutomationRunsPage(
+        runs=[
+            {
+                "id": "r1",
+                "created_at": "2026-10-02T00:00:00Z",
+                "status": "FAILED",
+                "conversation_id": None,
+            }
+        ]
+    )
+    calls = {}
+
+    async def fake_fetch_automations(client, base_url, api_key):
+        return [automation]
+
+    async def fake_read_run_pages(client, base_url, api_key, automations, scan):
+        return RunReadResult(pages=[(automation, page)], unavailable=[])
+
+    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+        calls["run_ids"] = run_ids
+        calls["runs_base_url"] = runs_base_url
+        return {"r1": "c1"}
+
+    async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
+        calls["conversation_ids"] = conversation_ids
+        return {"c1": {"id": "c1", "title": "failed chat", "tags": {}}}
+
+    monkeypatch.setattr(api, "fetch_automations", fake_fetch_automations)
+    monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "resolve_run_conversations", fake_resolve)
+    monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/automation/runs",
+        headers=key_headers(),
+        params={"has_conversation": "true"},
+    )
+
+    assert response.status_code == 200
+    assert calls["run_ids"] == ["r1"]
+    assert calls["runs_base_url"] == "http://127.0.0.1:8000"
+    assert calls["conversation_ids"] == ["c1"]
+    assert response.json()["runs"] == [
+        {
+            "id": "r1",
+            "created_at": "2026-10-02T00:00:00Z",
+            "status": "FAILED",
+            "conversation_id": "c1",
+            "automation_name": "nightly",
+            "conversation_title": "failed chat",
+            "conversation_tags": {},
+        }
+    ]
+
+
+def test_runs_run_lookup_repairs_a_lost_conversation_id(tmp_path, monkeypatch):
+    automation = {"id": "a1", "name": "nightly"}
+    page = AutomationRunsPage(
+        runs=[{"id": "r1", "created_at": "2026-10-02T00:00:00Z", "status": "FAILED"}]
+    )
+    calls = {}
+
+    async def fake_fetch_automations(client, base_url, api_key):
+        return [automation]
+
+    async def fake_read_run_pages(client, base_url, api_key, automations, scan):
+        assert isinstance(scan, SingleRun)
+        return RunReadResult(pages=[(automation, page)], unavailable=[])
+
+    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+        calls["run_ids"] = run_ids
+        return {"r1": "c1"}
+
+    async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
+        calls["conversation_ids"] = conversation_ids
+        return {"c1": {"id": "c1", "title": "failed chat", "tags": {}}}
+
+    monkeypatch.setattr(api, "fetch_automations", fake_fetch_automations)
+    monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "resolve_run_conversations", fake_resolve)
+    monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/automation/runs",
+        headers=key_headers(),
+        params={"run_id": "r1"},
+    )
+
+    assert response.status_code == 200
+    assert calls["run_ids"] == ["r1"]
+    assert calls["conversation_ids"] == ["c1"]
+    assert response.json()["runs"] == [
+        {
+            "id": "r1",
+            "created_at": "2026-10-02T00:00:00Z",
+            "status": "FAILED",
+            "conversation_id": "c1",
+            "automation_name": "nightly",
+            "conversation_title": "failed chat",
+            "conversation_tags": {},
+        }
+    ]
+
+
+def test_runs_chat_page_drops_a_failed_run_with_no_resolvable_conversation(tmp_path, monkeypatch):
+    automation = {"id": "a1", "name": "nightly"}
+    page = AutomationRunsPage(
+        runs=[
+            {"id": "r1", "created_at": "2026-10-02T00:00:00Z", "status": "FAILED"},
+            {"id": "r2", "created_at": "2026-10-01T00:00:00Z", "conversation_id": "c2"},
+        ]
+    )
+
+    async def fake_fetch_automations(client, base_url, api_key):
+        return [automation]
+
+    async def fake_read_run_pages(client, base_url, api_key, automations, scan):
+        return RunReadResult(pages=[(automation, page)], unavailable=[])
+
+    async def fake_resolve(*args, **kwargs):
+        return {}
+
+    async def fake_fetch_records(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(api, "fetch_automations", fake_fetch_automations)
+    monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "resolve_run_conversations", fake_resolve)
+    monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/automation/runs",
+        headers=key_headers(),
+        params={"has_conversation": "true"},
+    )
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()["runs"]] == ["r2"]
+
+
 def test_runs_plain_table_skips_the_chat_read(tmp_path, monkeypatch):
     automation = {"id": "a1", "name": "nightly"}
     page = AutomationRunsPage(runs=[{"id": "r1", "created_at": "2026-10-02T00:00:00Z"}])

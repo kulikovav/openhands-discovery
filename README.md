@@ -31,7 +31,9 @@ The service listens on `127.0.0.1` only. nginx publishes the
 
 `GET /api/discovery/automation/runs` accepts `limit`, `automation_id`,
 `run_id`, `status`, and `has_conversation`. `run_id` wins when a request sets
-both `run_id` and `has_conversation`.
+both `run_id` and `has_conversation`. A failed or cancelled run that lost its
+`conversation_id` is resolved from the conversation `automationrunid` tag, so
+the chat page does not hide a conversation the deployment created.
 
 A backend that contributes no rows, because its health probe failed or its
 read failed, appears in `unavailable`. An empty page therefore never hides a
