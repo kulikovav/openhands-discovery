@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.0.2"]
+dev = ["pytest==9.0.3"]
 
 [project.scripts]
 openhands-discovery = "openhands_discovery.__main__:main"
