@@ -50,6 +50,14 @@ python3 -m venv .venv
 The config path is optional. Its default is
 `/etc/agent-canvas/discovery.json`.
 
+The deployment verification runs the domain self-check on the host:
+
+```sh
+.venv/bin/openhands-discovery --self-check
+```
+
+It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
+
 ## Configuration
 
 ```json
@@ -113,7 +121,7 @@ src/openhands_discovery/
   conversations.py  conversation walk, cursor, merge
   models.py         response models and backend roles
   runs.py           run scans, merge, chat projection
-  upstream.py       shared upstream JSON read
-  __main__.py       command line entry point
+  upstream.py       shared upstream JSON read and the key header
+  __main__.py       command line entry point and domain self-check
 tests/              pytest suite
 ```

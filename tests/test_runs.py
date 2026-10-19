@@ -4,6 +4,7 @@ import httpx
 
 from openhands_discovery.runs import (
     RUN_PAGE_SIZE,
+    RUN_SCAN_PAGE_LIMIT,
     AutomationRunsPage,
     ChatRuns,
     NewestRuns,
@@ -302,3 +303,45 @@ def test_fetch_run_conversation_records_skips_the_second_read_on_one_backend():
 
     assert set(asyncio.run(run())) == {"c1"}
     assert len(requests) == 1
+
+
+def test_chat_runs_stops_at_the_page_bound():
+    offsets = []
+
+    def handler(request):
+        offsets.append(int(request.url.params["offset"]))
+        return httpx.Response(
+            200,
+            json={"runs": [{"id": f"r{len(offsets)}"}], "total": 10000},
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await ChatRuns(100).read_page(client, "http://127.0.0.1:8000", "key", "a1")
+
+    page = asyncio.run(run())
+
+    assert len(offsets) == RUN_SCAN_PAGE_LIMIT
+    assert page.runs == []
+
+
+def test_single_run_stops_at_the_page_bound():
+    offsets = []
+
+    def handler(request):
+        offsets.append(int(request.url.params["offset"]))
+        return httpx.Response(
+            200,
+            json={"runs": [{"id": f"r{len(offsets)}"}], "total": 10000},
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await SingleRun("missing").read_page(client, "http://127.0.0.1:8000", "key", "a1")
+
+    page = asyncio.run(run())
+
+    assert len(offsets) == RUN_SCAN_PAGE_LIMIT
+    assert page.runs == []

@@ -5,8 +5,8 @@ import hmac
 from fastapi import Header, HTTPException, Request
 
 from .config import DiscoveryConfig
+from .upstream import API_KEY_HEADER
 
-API_KEY_HEADER = "X-Session-API-Key"
 API_KEY_NAME = "OH_SESSION_API_KEYS_0"
 
 

@@ -160,3 +160,44 @@ def test_compile_backends_reports_the_ingress_version_only(tmp_path, monkeypatch
     assert entries[2].healthy is False
     assert entries[2].error == "the health endpoint answered HTTP 503"
     assert all(entry.active for entry in entries)
+
+
+def test_compile_backends_leaves_the_version_empty_on_a_failed_read(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+
+    def handler(url, headers):
+        if url.endswith("/api/automation/server_info"):
+            return FakeResponse({}, status_code=500)
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return False
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    entries = asyncio.run(compile_backends(config, "secret"))
+
+    assert entries[0].version == ""
+    assert entries[0].active is False
+
+
+class CompletedProcess:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def test_unit_is_active_sync_reads_the_return_code(monkeypatch):
+    monkeypatch.setattr(backends.subprocess, "run", lambda *args, **kwargs: CompletedProcess(0))
+    assert backends.unit_is_active_sync("agent-canvas.service") is True
+
+    monkeypatch.setattr(backends.subprocess, "run", lambda *args, **kwargs: CompletedProcess(3))
+    assert backends.unit_is_active_sync("agent-canvas.service") is False
+
+
+def test_unit_is_active_sync_handles_a_missing_systemctl(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("systemctl is not available")
+
+    monkeypatch.setattr(backends.subprocess, "run", fail)
+    assert backends.unit_is_active_sync("agent-canvas.service") is False

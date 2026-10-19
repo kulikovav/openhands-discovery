@@ -4,14 +4,14 @@ from typing import Any
 
 import httpx
 
-from .auth import API_KEY_HEADER
+API_KEY_HEADER = "X-Session-API-Key"
 
 
 async def fetch_json(
     client: httpx.AsyncClient,
     url: str,
     api_key: str,
-    params: Any = None,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Read one upstream page as a JSON object.
 

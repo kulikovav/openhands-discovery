@@ -13,9 +13,9 @@ from dataclasses import dataclass
 
 import httpx
 
-from .auth import API_KEY_HEADER
 from .config import DiscoveryConfig
 from .models import BackendEntry, BackendRole, UnavailableBackend
+from .upstream import API_KEY_HEADER
 
 PROBE_TIMEOUT_SECONDS = 2
 HEALTH_PATH = "/health"

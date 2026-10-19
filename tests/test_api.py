@@ -1,12 +1,13 @@
 import asyncio
 
 import httpx
+import pytest
 
 from openhands_discovery import api
 from openhands_discovery.config import DiscoveryConfig
 from openhands_discovery.conversations import ConversationWalk
 from openhands_discovery.models import BackendEntry, BackendRole, UnavailableBackend
-from openhands_discovery.runs import AutomationRunsPage, ChatRuns, RunReadResult
+from openhands_discovery.runs import AutomationRunsPage, ChatRuns, RunReadResult, SingleRun
 
 
 def make_config(tmp_path, key="secret", **overrides):
@@ -264,3 +265,88 @@ def test_runs_plain_table_skips_the_chat_read(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json()["runs"][0]["conversation_title"] == ""
     assert response.json()["runs"][0]["conversation_tags"] is None
+
+
+def test_key_rotation_applies_to_the_next_request(tmp_path, monkeypatch):
+    async def fake_compile(config, api_key):
+        return []
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    app = api.create_app(make_config(tmp_path))
+
+    assert get(app, "/api/discovery/backends", headers=key_headers()).status_code == 200
+    (tmp_path / "env").write_text("OH_SESSION_API_KEYS_0=rotated\n", encoding="utf-8")
+    assert get(app, "/api/discovery/backends", headers=key_headers()).status_code == 401
+    rotated = get(app, "/api/discovery/backends", headers={"X-Session-API-Key": "rotated"})
+    assert rotated.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/discovery/conversations", "/api/discovery/automation/runs"],
+)
+def test_list_routes_require_the_key(tmp_path, path):
+    response = get(api.create_app(make_config(tmp_path)), path)
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "a valid X-Session-API-Key header is required"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/discovery/conversations", "/api/discovery/automation/runs"],
+)
+def test_list_routes_validate_the_limit(tmp_path, path):
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        path,
+        headers=key_headers(),
+        params={"limit": "0"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"error": "the request parameters are invalid"}
+
+
+def test_runs_narrows_to_one_automation_and_resolves_a_run(tmp_path, monkeypatch):
+    automation = {"id": "a1", "name": "nightly"}
+    page = AutomationRunsPage(
+        runs=[{"id": "r1", "created_at": "2026-10-02T00:00:00Z", "conversation_id": "c1"}]
+    )
+    calls = {}
+
+    async def fake_fetch_automation(client, base_url, api_key, automation_id):
+        calls["automation_id"] = automation_id
+        return automation
+
+    async def forbidden_fetch_automations(*args, **kwargs):
+        raise AssertionError("the narrowed read must not list automations")
+
+    async def fake_read_run_pages(client, base_url, api_key, automations, scan):
+        calls["scan"] = scan
+        calls["automations"] = automations
+        return RunReadResult(pages=[(automation, page)], unavailable=[])
+
+    async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
+        calls["conversation_ids"] = conversation_ids
+        calls["runs_base_url"] = runs_base_url
+        return {}
+
+    monkeypatch.setattr(api, "fetch_automation", fake_fetch_automation)
+    monkeypatch.setattr(api, "fetch_automations", forbidden_fetch_automations)
+    monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/automation/runs",
+        headers=key_headers(),
+        params={"automation_id": "a1", "run_id": "r1"},
+    )
+
+    assert response.status_code == 200
+    assert calls["automation_id"] == "a1"
+    assert calls["automations"] == [automation]
+    assert isinstance(calls["scan"], SingleRun)
+    assert calls["scan"].run_id == "r1"
+    assert calls["conversation_ids"] == ["c1"]
+    assert calls["runs_base_url"] == "http://127.0.0.1:8000"

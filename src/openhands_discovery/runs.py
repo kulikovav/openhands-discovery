@@ -14,9 +14,8 @@ from typing import Any, Protocol
 
 import httpx
 
-from .auth import API_KEY_HEADER
 from .models import UnavailableAutomation, text_tags
-from .upstream import fetch_json
+from .upstream import API_KEY_HEADER, fetch_json
 
 AUTOMATIONS_PATH = "/api/automation/v1"
 CONVERSATION_RECORDS_PATH = "/api/conversations"
