@@ -69,6 +69,21 @@ def test_build_targets_puts_ingress_first_and_runs_last(tmp_path):
     assert [target.reports_version for target in targets] == [True, False, False]
 
 
+def test_build_targets_names_each_slot_by_its_number(tmp_path):
+    config = make_config(tmp_path)
+    quadlet_dir = tmp_path / "quadlet"
+    (quadlet_dir / "agent-canvas-slot-1.container").write_text(
+        "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
+    )
+    (quadlet_dir / "agent-canvas-slot-10.container").write_text(
+        "PublishPort=127.0.0.1:18109:8000\n", encoding="utf-8"
+    )
+
+    slot_urls = [target.url for target in build_targets(config) if target.role is BackendRole.SLOT]
+
+    assert slot_urls == ["https://b1.oh.example", "https://b10.oh.example"]
+
+
 def test_build_targets_skips_the_runs_server_when_a_key_is_missing(tmp_path):
     config = make_config(tmp_path, runs_port=8010)
     assert [target.name for target in build_targets(config)] == ["automations"]
