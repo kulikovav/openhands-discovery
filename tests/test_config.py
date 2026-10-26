@@ -13,7 +13,7 @@ def write_config(tmp_path, **overrides):
         "ingress_port": 8000,
         "listen_port": 18080,
         "quadlet_dir": "/tmp/quadlet",
-        "slot_public_base_port": 8443,
+        "slot_public_host_prefix": "b",
     }
     values.update(overrides)
     path = tmp_path / "discovery.json"
@@ -22,7 +22,9 @@ def write_config(tmp_path, **overrides):
 
 
 def test_load_config_reads_the_optional_runs_keys(tmp_path):
-    config = load_config(write_config(tmp_path, runs_port=8010, runs_public_port=9443))
+    config = load_config(
+        write_config(tmp_path, runs_port=8010, runs_public_host="a1.oh.example")
+    )
 
     assert config.runs_configured is True
     assert config.public_root == "https://oh.example"

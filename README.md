@@ -70,9 +70,9 @@ It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
   "listen_port": 18080,
   "quadlet_dir": "/home/agent-canvas/.config/containers/systemd",
   "runs_port": 8010,
-  "runs_public_port": 9443,
+  "runs_public_host": "a1.oh.example",
   "scheme": "https",
-  "slot_public_base_port": 8443
+  "slot_public_host_prefix": "b"
 }
 ```
 
@@ -84,11 +84,11 @@ It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
 | `listen_port` | The loopback port of this service. |
 | `quadlet_dir` | The directory with the slot Quadlet units. The service reads the loopback publish port from each unit. |
 | `runs_port` | The loopback port of the automation runs server. Optional. |
-| `runs_public_port` | The public port of the automation runs server. Optional. |
+| `runs_public_host` | The public host name of the automation runs server. Optional. |
 | `scheme` | The public URL scheme. Default is `https`. |
-| `slot_public_base_port` | The public port of slot 1. Slot N uses base + N - 1. |
+| `slot_public_host_prefix` | The public host name prefix of the cloud-agent slots. Slot N answers on `<prefix>N.<domain>`. |
 
-The runs backend is present only when both `runs_port` and `runs_public_port`
+The runs backend is present only when both `runs_port` and `runs_public_host`
 are set.
 
 ## Design

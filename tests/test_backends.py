@@ -17,7 +17,7 @@ def make_config(tmp_path, **overrides):
         "ingress_port": 8000,
         "listen_port": 18080,
         "quadlet_dir": str(quadlet_dir),
-        "slot_public_base_port": 8443,
+        "slot_public_host_prefix": "b",
     }
     values.update(overrides)
     return DiscoveryConfig(**values)
@@ -46,7 +46,7 @@ def test_slot_ports_returns_empty_when_the_directory_is_missing(tmp_path):
 
 
 def test_build_targets_puts_ingress_first_and_runs_last(tmp_path):
-    config = make_config(tmp_path, runs_port=8010, runs_public_port=9443)
+    config = make_config(tmp_path, runs_port=8010, runs_public_host="a1.oh.example")
     quadlet_dir = tmp_path / "quadlet"
     (quadlet_dir / "agent-canvas-slot-1.container").write_text(
         "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
@@ -62,8 +62,8 @@ def test_build_targets_puts_ingress_first_and_runs_last(tmp_path):
     ]
     assert [target.url for target in targets] == [
         "https://oh.example",
-        "https://oh.example:8443",
-        "https://oh.example:9443",
+        "https://b1.oh.example",
+        "https://a1.oh.example",
     ]
     assert [target.port for target in targets] == [8000, 18100, 8010]
     assert [target.reports_version for target in targets] == [True, False, False]

@@ -103,7 +103,7 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
             BackendTarget(
                 name=f"backend-{number}",
                 role=BackendRole.SLOT,
-                url=f"{public_root}:{config.slot_public_base_port + number - 1}",
+                url=f"{config.scheme}://{config.slot_public_host_prefix}{number}.{config.domain}",
                 port=port,
                 unit=f"agent-canvas-slot-{number}.service",
             )
@@ -113,7 +113,7 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
             BackendTarget(
                 name="automation-runs",
                 role=BackendRole.AUTOMATIONS,
-                url=f"{public_root}:{config.runs_public_port}",
+                url=f"{config.scheme}://{config.runs_public_host}",
                 port=config.runs_port,
                 unit="agent-canvas-runs.service",
             )

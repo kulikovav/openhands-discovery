@@ -19,7 +19,7 @@ def make_config(tmp_path, key="secret", **overrides):
         "ingress_port": 8000,
         "listen_port": 18080,
         "quadlet_dir": str(tmp_path / "quadlet"),
-        "slot_public_base_port": 8443,
+        "slot_public_host_prefix": "b",
     }
     values.update(overrides)
     return DiscoveryConfig(**values)

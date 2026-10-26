@@ -22,10 +22,10 @@ class DiscoveryConfig(BaseModel):
     ingress_port: int
     listen_port: int
     quadlet_dir: str
-    slot_public_base_port: int
+    slot_public_host_prefix: str
     scheme: str = "https"
     runs_port: int | None = None
-    runs_public_port: int | None = None
+    runs_public_host: str | None = None
 
     @property
     def public_root(self) -> str:
@@ -35,7 +35,7 @@ class DiscoveryConfig(BaseModel):
     @property
     def runs_configured(self) -> bool:
         """Whether the automation runs server is part of the deployment."""
-        return self.runs_port is not None and self.runs_public_port is not None
+        return self.runs_port is not None and self.runs_public_host is not None
 
 
 def load_config(path: str | Path) -> DiscoveryConfig:
