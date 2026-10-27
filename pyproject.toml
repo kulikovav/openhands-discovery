@@ -27,3 +27,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.uv]
+# This repository waits seven days after a PyPI upload before it resolves a
+# version. The lock keeps that cutoff, so a fresh release cannot enter it.
+exclude-newer = "7 days"
