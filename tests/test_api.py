@@ -67,7 +67,7 @@ def test_backends_requires_the_deployment_key(tmp_path):
 
 
 def test_backends_returns_the_compiled_list(tmp_path, monkeypatch):
-    entry = make_backend("automations", BackendRole.INGRESS, 8000)
+    entry = make_backend("canvas", BackendRole.INGRESS, 8000)
 
     async def fake_compile(config, api_key):
         assert api_key == "secret"
@@ -80,7 +80,7 @@ def test_backends_returns_the_compiled_list(tmp_path, monkeypatch):
     assert response.json() == {
         "backends": [
             {
-                "name": "automations",
+                "name": "canvas",
                 "role": "ingress",
                 "url": "https://oh.example:8000",
                 "port": 8000,
@@ -118,7 +118,7 @@ def test_invalid_cursor_is_a_bad_request(tmp_path):
 
 
 def test_conversations_reports_health_failures_then_read_failures(tmp_path, monkeypatch):
-    ingress = make_backend("automations", BackendRole.INGRESS, 8000)
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
     slot = make_backend(
         "backend-1",
         BackendRole.SLOT,
@@ -131,13 +131,13 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
         return [ingress, slot]
 
     async def fake_walk(client, backends, api_key, limit, cursors):
-        assert [backend.name for backend in backends] == ["automations"]
+        assert [backend.name for backend in backends] == ["canvas"]
         return ConversationWalk(
             conversations=[],
             next_page_id=None,
             unavailable=[
                 UnavailableBackend(
-                    name="automations",
+                    name="canvas",
                     role=BackendRole.INGRESS,
                     error="the search page answered HTTP 500",
                 )
@@ -156,7 +156,7 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
             "error": "the health endpoint is unreachable",
         },
         {
-            "name": "automations",
+            "name": "canvas",
             "role": "ingress",
             "error": "the search page answered HTTP 500",
         },

@@ -54,7 +54,7 @@ def test_build_targets_puts_ingress_first_and_runs_last(tmp_path):
 
     targets = build_targets(config)
 
-    assert [target.name for target in targets] == ["automations", "backend-1", "automation-runs"]
+    assert [target.name for target in targets] == ["canvas", "backend-1", "automation-runs"]
     assert [target.role for target in targets] == [
         BackendRole.INGRESS,
         BackendRole.SLOT,
@@ -86,12 +86,12 @@ def test_build_targets_names_each_slot_by_its_number(tmp_path):
 
 def test_build_targets_skips_the_runs_server_when_a_key_is_missing(tmp_path):
     config = make_config(tmp_path, runs_port=8010)
-    assert [target.name for target in build_targets(config)] == ["automations"]
+    assert [target.name for target in build_targets(config)] == ["canvas"]
 
 
 def test_unavailable_backends_filters_by_role():
     ingress = BackendEntry(
-        name="automations",
+        name="canvas",
         role=BackendRole.INGRESS,
         url="https://oh.example",
         port=8000,
@@ -167,7 +167,7 @@ def test_compile_backends_reports_the_ingress_version_only(tmp_path, monkeypatch
 
     entries = asyncio.run(compile_backends(config, "secret"))
 
-    assert [entry.name for entry in entries] == ["automations", "backend-1", "backend-2"]
+    assert [entry.name for entry in entries] == ["canvas", "backend-1", "backend-2"]
     assert entries[0].version == "1.2.3 (sdk 0.9)"
     assert [entry.version for entry in entries[1:]] == ["", ""]
     assert entries[0].healthy is True

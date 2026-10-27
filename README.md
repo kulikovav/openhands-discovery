@@ -8,7 +8,7 @@ service instead of fanning out to every backend itself.
 
 The backend list has three roles:
 
-- `automations`: the ingress container. It serves the automation API.
+- `canvas`: the ingress container. It serves the automation API.
 - `backend-N`: the cloud-agent slots. The bridge schedules conversations here.
 - `automation-runs`: the server that owns the conversations of automation runs.
   The bridge reads transcripts here and never schedules here.

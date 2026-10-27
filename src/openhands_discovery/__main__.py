@@ -22,7 +22,7 @@ def self_check() -> None:
     covers the same rules with more cases.
     """
     ingress = BackendEntry(
-        name="automations",
+        name="canvas",
         role=BackendRole.INGRESS,
         url="https://oh.example",
         port=8000,
@@ -48,7 +48,7 @@ def self_check() -> None:
         ]
     )
     assert [row["id"] for row in merged] == ["c2", "c1", "c3"], merged
-    assert merged[0]["backend"].name == "automations", merged
+    assert merged[0]["backend"].name == "canvas", merged
 
     cursor = encode_cursor({"backend-1": "page-2"})
     assert decode_cursor(cursor) == {"backend-1": "page-2"}
