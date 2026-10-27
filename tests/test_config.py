@@ -44,3 +44,25 @@ def test_load_config_rejects_a_missing_key(tmp_path):
 
     with pytest.raises(ValidationError):
         load_config(path)
+
+
+def test_load_config_defaults_the_backend_names(tmp_path):
+    config = load_config(write_config(tmp_path))
+
+    assert (config.ingress_name, config.slot_name_prefix, config.runs_name) == (
+        "canvas",
+        "backend-",
+        "automation-runs",
+    )
+
+
+def test_load_config_reads_the_backend_names(tmp_path):
+    config = load_config(
+        write_config(tmp_path, ingress_name="oh", slot_name_prefix="agent-", runs_name="runs")
+    )
+
+    assert (config.ingress_name, config.slot_name_prefix, config.runs_name) == (
+        "oh",
+        "agent-",
+        "runs",
+    )

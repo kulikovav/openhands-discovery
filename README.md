@@ -6,12 +6,15 @@ The service runs on the deployment host. It compiles the list of OpenHands
 backends and merges the deployment's list-shaped reads. The bridge reads this
 service instead of fanning out to every backend itself.
 
-The backend list has three roles:
+The backend list has three roles, and each carries a configurable display name:
 
-- `canvas`: the ingress container. It serves the automation API.
-- `backend-N`: the cloud-agent slots. The bridge schedules conversations here.
-- `automation-runs`: the server that owns the conversations of automation runs.
-  The bridge reads transcripts here and never schedules here.
+- `ingress`: the ingress container, named `canvas` by default. It serves the
+  automation API.
+- `slot`: the cloud-agent slots, named `backend-<N>` by default. The bridge
+  schedules conversations here.
+- `automations`: the server that owns the conversations of automation runs,
+  named `automation-runs` by default. The bridge reads transcripts here and
+  never schedules here.
 
 The service listens on `127.0.0.1` only. nginx publishes the
 `/api/discovery/` paths on the deployment TLS port. Every path except
@@ -66,12 +69,15 @@ It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
 {
   "domain": "oh.example",
   "env_file": "/home/agent-canvas/agent-canvas.env",
+  "ingress_name": "canvas",
   "ingress_port": 8000,
   "listen_port": 18080,
   "quadlet_dir": "/home/agent-canvas/.config/containers/systemd",
+  "runs_name": "automation-runs",
   "runs_port": 8010,
   "runs_public_host": "a1.oh.example",
   "scheme": "https",
+  "slot_name_prefix": "backend-",
   "slot_public_host_prefix": "b"
 }
 ```
@@ -80,12 +86,15 @@ It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
 | --- | --- |
 | `domain` | The public host name of the deployment. |
 | `env_file` | The Podman environment file. The service reads `OH_SESSION_API_KEYS_0` from it on every request, so a key rotation applies without a restart. |
+| `ingress_name` | Display name of the ingress backend. Default is `canvas`. |
 | `ingress_port` | The loopback port of the ingress automation API. |
 | `listen_port` | The loopback port of this service. |
 | `quadlet_dir` | The directory with the slot Quadlet units. The service reads the loopback publish port from each unit. |
+| `runs_name` | Display name of the runs backend. Default is `automation-runs`. |
 | `runs_port` | The loopback port of the automation runs server. Optional. |
 | `runs_public_host` | The public host name of the automation runs server. Optional. |
 | `scheme` | The public URL scheme. Default is `https`. |
+| `slot_name_prefix` | Prefix of a slot's display name, followed by its number. Default is `backend-`. |
 | `slot_public_host_prefix` | The public host name prefix of the cloud-agent slots. Slot N answers on `<prefix>N.<domain>`. |
 
 The runs backend is present only when both `runs_port` and `runs_public_host`

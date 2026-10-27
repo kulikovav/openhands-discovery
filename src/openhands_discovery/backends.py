@@ -83,14 +83,13 @@ def slot_ports(config: DiscoveryConfig) -> list[tuple[int, int]]:
 def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
     """Compile the probe targets in the fixed order: ingress, slots, runs.
 
-    The ingress is named for the deployment, the slots are named for the agent
-    backends the bridge fills, and the runs server is named for the
-    conversations it owns.
+    The names come from the configuration, because they are display
+    identifiers: the bridge selects a backend by its role.
     """
     public_root = config.public_root
     targets = [
         BackendTarget(
-            name="canvas",
+            name=config.ingress_name,
             role=BackendRole.INGRESS,
             url=public_root,
             port=config.ingress_port,
@@ -101,7 +100,7 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
     for number, port in slot_ports(config):
         targets.append(
             BackendTarget(
-                name=f"backend-{number}",
+                name=f"{config.slot_name_prefix}{number}",
                 role=BackendRole.SLOT,
                 url=f"{config.scheme}://{config.slot_public_host_prefix}{number}.{config.domain}",
                 port=port,
@@ -111,7 +110,7 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
     if config.runs_configured:
         targets.append(
             BackendTarget(
-                name="automation-runs",
+                name=config.runs_name,
                 role=BackendRole.AUTOMATIONS,
                 url=f"{config.scheme}://{config.runs_public_host}",
                 port=config.runs_port,

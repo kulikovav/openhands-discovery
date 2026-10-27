@@ -84,6 +84,23 @@ def test_build_targets_names_each_slot_by_its_number(tmp_path):
     assert slot_urls == ["https://b1.oh.example", "https://b10.oh.example"]
 
 
+def test_build_targets_uses_the_configured_backend_names(tmp_path):
+    config = make_config(
+        tmp_path,
+        ingress_name="oh",
+        slot_name_prefix="agent-",
+        runs_name="automation",
+        runs_port=8010,
+        runs_public_host="a1.oh.example",
+    )
+    quadlet_dir = tmp_path / "quadlet"
+    (quadlet_dir / "agent-canvas-slot-2.container").write_text(
+        "PublishPort=127.0.0.1:18101:8000\n", encoding="utf-8"
+    )
+
+    assert [target.name for target in build_targets(config)] == ["oh", "agent-2", "automation"]
+
+
 def test_build_targets_skips_the_runs_server_when_a_key_is_missing(tmp_path):
     config = make_config(tmp_path, runs_port=8010)
     assert [target.name for target in build_targets(config)] == ["canvas"]
