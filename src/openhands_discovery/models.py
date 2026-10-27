@@ -63,6 +63,49 @@ class ConversationsResponse(BaseModel):
     unavailable: list[UnavailableBackend] = Field(default_factory=list)
 
 
+class AgentWorkspace(BaseModel):
+    """The working directory an agent runs in."""
+
+    kind: str = ""
+    working_dir: str = ""
+
+
+class AgentProfileRef(BaseModel):
+    """The agent profile an agent launched with."""
+
+    agent_profile_id: str = ""
+    revision: int | None = None
+
+
+class AgentListItem(BaseModel):
+    """One row of the bridge's agent list.
+
+    The composer list renders the id, title, tags, status, timestamps,
+    workspace, launched profile, and last message id. A search row carries the
+    whole conversation record, about 28 KB, and a page of them crosses the
+    bridge's slow link as several megabytes. This projection keeps the merge
+    cheap to transfer; the agent server fields it drops are never read by the
+    list.
+    """
+
+    id: str
+    backend: BackendRef
+    title: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+    execution_status: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+    workspace: AgentWorkspace | None = None
+    launched_agent_profile: AgentProfileRef | None = None
+    last_user_message_id: str | None = None
+
+
+class AgentsResponse(BaseModel):
+    agents: list[AgentListItem]
+    next_page_id: str | None = None
+    unavailable: list[UnavailableBackend] = Field(default_factory=list)
+
+
 class UnavailableAutomation(BaseModel):
     """An automation whose run page failed."""
 

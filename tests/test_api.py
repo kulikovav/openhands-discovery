@@ -5,7 +5,7 @@ import pytest
 
 from openhands_discovery import api
 from openhands_discovery.config import DiscoveryConfig
-from openhands_discovery.conversations import ConversationWalk
+from openhands_discovery.conversations import CONVERSATION_PAGE_SIZE, ConversationWalk
 from openhands_discovery.models import BackendEntry, BackendRole, UnavailableBackend
 from openhands_discovery.runs import AutomationRunsPage, ChatRuns, RunReadResult, SingleRun
 
@@ -425,7 +425,7 @@ def test_key_rotation_applies_to_the_next_request(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/discovery/conversations", "/api/discovery/automation/runs"],
+    ["/api/discovery/conversations", "/api/discovery/agents", "/api/discovery/automation/runs"],
 )
 def test_list_routes_require_the_key(tmp_path, path):
     response = get(api.create_app(make_config(tmp_path)), path)
@@ -436,7 +436,7 @@ def test_list_routes_require_the_key(tmp_path, path):
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/discovery/conversations", "/api/discovery/automation/runs"],
+    ["/api/discovery/conversations", "/api/discovery/agents", "/api/discovery/automation/runs"],
 )
 def test_list_routes_validate_the_limit(tmp_path, path):
     response = get(
@@ -492,3 +492,152 @@ def test_runs_narrows_to_one_automation_and_resolves_a_run(tmp_path, monkeypatch
     assert calls["scan"].run_id == "r1"
     assert calls["conversation_ids"] == ["c1"]
     assert calls["runs_base_url"] == "http://127.0.0.1:8000"
+
+
+def test_agents_route_keeps_only_the_list_fields(tmp_path, monkeypatch):
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
+
+    async def fake_compile(config, api_key):
+        return [ingress]
+
+    async def fake_walk(client, backends, api_key, limit, cursors):
+        return ConversationWalk(
+            conversations=[
+                {
+                    "id": "conversation-1",
+                    "backend": {"name": "canvas", "role": "ingress", "url": "https://oh.example:8000"},
+                    "title": "Nightly review",
+                    "tags": {"bridgemode": "cloudagent"},
+                    "execution_status": "running",
+                    "created_at": "2026-10-27T10:00:00Z",
+                    "updated_at": "2026-10-27T10:00:05Z",
+                    "workspace": {"kind": "LocalWorkspace", "working_dir": "/projects/worktrees/agent"},
+                    "launched_agent_profile": {"agent_profile_id": "profile-1", "revision": 2},
+                    "last_user_message_id": "bubble-1",
+                    "metrics": {"total_cost": 1.5},
+                    "agent_state": {"huge": "detail"},
+                }
+            ],
+            next_page_id="next",
+            unavailable=[],
+        )
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    monkeypatch.setattr(api, "read_walk", fake_walk)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/agents",
+        headers=key_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["next_page_id"] == "next"
+    row = payload["agents"][0]
+    assert row["id"] == "conversation-1"
+    assert row["execution_status"] == "running"
+    assert row["workspace"]["working_dir"] == "/projects/worktrees/agent"
+    assert row["launched_agent_profile"]["agent_profile_id"] == "profile-1"
+    assert "metrics" not in row
+    assert "agent_state" not in row
+
+
+@pytest.mark.parametrize("path", ["/api/discovery/conversations", "/api/discovery/agents"])
+def test_list_routes_share_one_read_inside_the_cache_window(tmp_path, monkeypatch, path):
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
+    calls = {"compile": 0, "walk": 0}
+
+    async def fake_compile(config, api_key):
+        calls["compile"] += 1
+        return [ingress]
+
+    async def fake_walk(client, backends, api_key, limit, cursors):
+        calls["walk"] += 1
+        return ConversationWalk(conversations=[], next_page_id=None, unavailable=[])
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    monkeypatch.setattr(api, "read_walk", fake_walk)
+    app = api.create_app(make_config(tmp_path))
+    assert get(app, path, headers=key_headers()).status_code == 200
+    assert get(app, path, headers=key_headers()).status_code == 200
+
+    assert calls == {"compile": 1, "walk": 1}
+
+
+def test_list_route_serves_the_last_page_while_a_refresh_runs(tmp_path, monkeypatch):
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def fake_compile(config, api_key):
+        return [ingress]
+
+    async def fake_walk(client, backends, api_key, limit, cursors):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            started.set()
+            await release.wait()
+            finished.set()
+        return ConversationWalk(
+            conversations=[
+                {
+                    "id": "conversation-1",
+                    "backend": {"name": "canvas", "role": "ingress", "url": "https://oh.example:8000"},
+                    "title": "Nightly review" if calls == 1 else "Refreshed review",
+                }
+            ],
+            next_page_id=None,
+            unavailable=[],
+        )
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    monkeypatch.setattr(api, "read_walk", fake_walk)
+    monkeypatch.setattr(api, "PAGE_FRESH_SECONDS", 0)
+    app = api.create_app(make_config(tmp_path))
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.get("/api/discovery/agents", headers=key_headers())
+            second = await asyncio.wait_for(
+                client.get("/api/discovery/agents", headers=key_headers()),
+                timeout=1,
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            release.set()
+            await asyncio.wait_for(finished.wait(), timeout=1)
+            calls_after_refresh = calls
+            third = await client.get("/api/discovery/agents", headers=key_headers())
+        return first, second, third, calls_after_refresh
+
+    first, second, third, calls_after_refresh = asyncio.run(run())
+    assert second.json()["agents"][0]["title"] == first.json()["agents"][0]["title"]
+    assert second.json()["agents"][0]["title"] == "Nightly review"
+    assert third.json()["agents"][0]["title"] == "Refreshed review"
+    assert calls_after_refresh == 2
+
+
+def test_list_route_does_not_retain_a_page_above_the_default_limit(tmp_path, monkeypatch):
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
+    walks = 0
+
+    async def fake_compile(config, api_key):
+        return [ingress]
+
+    async def fake_walk(client, backends, api_key, limit, cursors):
+        nonlocal walks
+        walks += 1
+        return ConversationWalk(conversations=[], next_page_id=None, unavailable=[])
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    monkeypatch.setattr(api, "read_walk", fake_walk)
+    app = api.create_app(make_config(tmp_path))
+    params = {"limit": CONVERSATION_PAGE_SIZE + 1}
+    for _ in range(2):
+        response = get(app, "/api/discovery/agents", headers=key_headers(), params=params)
+        assert response.status_code == 200
+
+    assert walks == 2

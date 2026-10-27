@@ -27,10 +27,21 @@ The service listens on `127.0.0.1` only. nginx publishes the
 | `GET /health` | Liveness. No key. |
 | `GET /api/discovery/backends` | The compiled backend list, with a live health result per backend. |
 | `GET /api/discovery/conversations` | One merged conversation list, newest first, with a cursor for the remaining pages. |
+| `GET /api/discovery/agents` | The same merge walk projected to the fields the bridge's agent list renders. |
 | `GET /api/discovery/automation/runs` | One merged automation run list, newest first. |
 
 `GET /api/discovery/conversations` accepts `limit`, `page_id`, and `role`.
 `limit` is the page size per backend. `role` narrows the fan-out.
+
+`GET /api/discovery/agents` accepts the same parameters and answers the same
+rows, ordering, dedup, cursor, and `unavailable` list. Each row keeps only the
+id, title, tags, execution status, timestamps, workspace, launched profile, and
+last message id. A full search row is about 28 KB, and a page of them over the
+bridge's lossy link costs tens of seconds; this projection is about 1 KB per
+row and is what the bridge reads. Both list routes answer from one merged page
+for 5 seconds, then serve that page while a single background read refreshes
+it, for at most 60 seconds. A page with no servable answer waits for the
+fan-out again.
 
 `GET /api/discovery/automation/runs` accepts `limit`, `automation_id`,
 `run_id`, `status`, and `has_conversation`. `run_id` wins when a request sets
@@ -128,6 +139,7 @@ src/openhands_discovery/
   api.py            routes, error bodies, fan-out orchestration
   auth.py           deployment key read and constant-time compare
   backends.py       backend targets, probes, compiled backend list
+  cache.py          merged page cache with a fresh window and stale serving
   config.py         typed configuration
   conversations.py  conversation walk, cursor, merge
   models.py         response models and backend roles

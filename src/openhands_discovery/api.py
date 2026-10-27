@@ -1,5 +1,8 @@
 """HTTP entry layer: routes, authentication, and the fan-out orchestration."""
 
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -8,9 +11,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .auth import require_api_key
 from .backends import compile_backends, unavailable_backends
+from .cache import PageCache
 from .config import DiscoveryConfig
-from .conversations import CONVERSATION_PAGE_SIZE, decode_cursor, read_walk
+from .conversations import CONVERSATION_PAGE_SIZE, ConversationWalk, decode_cursor, read_walk
 from .models import (
+    AgentListItem,
+    AgentsResponse,
     BackendRole,
     BackendsResponse,
     ConversationRow,
@@ -18,6 +24,7 @@ from .models import (
     RunRow,
     RunsResponse,
     UnavailableAutomation,
+    UnavailableBackend,
 )
 from .runs import (
     AUTOMATION_SCAN_LIMIT,
@@ -35,9 +42,17 @@ from .runs import (
 )
 
 LIST_TIMEOUT_SECONDS = 10
+# The bridge polls the list every five seconds, so this window answers a poll
+# and a Glass burst without a read.
+PAGE_FRESH_SECONDS = 5.0
+# The last page stays servable while a refresh runs, or when the read raises,
+# so a slow fan-out cannot stall the list. A page older than this waits for a
+# new read again.
+PAGE_STALE_SECONDS = 60.0
 HEALTH_PATH = "/health"
 BACKENDS_PATH = "/api/discovery/backends"
 CONVERSATIONS_PATH = "/api/discovery/conversations"
+AGENTS_PATH = "/api/discovery/agents"
 AUTOMATION_RUNS_PATH = "/api/discovery/automation/runs"
 
 
@@ -75,6 +90,50 @@ async def list_backends(
     return BackendsResponse(backends=await compile_backends(config, api_key))
 
 
+@dataclass(frozen=True)
+class MergedPage:
+    """One merged page and the deployments that contributed no rows."""
+
+    walk: ConversationWalk
+    unavailable: list[UnavailableBackend]
+
+
+async def merged_page(
+    request: Request,
+    limit: int,
+    page_id: str | None,
+    role: BackendRole | None,
+    api_key: str,
+) -> MergedPage:
+    """Read one merged page, with one read shared by both list routes."""
+    config: DiscoveryConfig = request.app.state.config
+    try:
+        cursors = decode_cursor(page_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    async def read() -> MergedPage:
+        backends = await compile_backends(config, api_key)
+        candidates = [
+            backend for backend in backends if backend.healthy and (role is None or backend.role == role)
+        ]
+        unavailable = unavailable_backends(backends, role)
+
+        async with httpx.AsyncClient(timeout=LIST_TIMEOUT_SECONDS) as client:
+            walk = await read_walk(client, candidates, api_key, limit, cursors)
+
+        return MergedPage(walk=walk, unavailable=unavailable + walk.unavailable)
+
+    if limit > CONVERSATION_PAGE_SIZE:
+        # One such page can hold tens of megabytes, and the key ceiling would
+        # not bound them, so a larger page is served without retention.
+        return await read()
+    return await request.app.state.merged_pages.get_or_read(
+        (limit, page_id or "", role.value if role else ""),
+        read,
+    )
+
+
 async def list_conversations(
     request: Request,
     limit: int = Query(default=CONVERSATION_PAGE_SIZE, ge=1, le=500),
@@ -99,28 +158,36 @@ async def list_conversations(
     search page answered, so the bridge splits active and archived chats
     without another read.
     """
-    config: DiscoveryConfig = request.app.state.config
-    try:
-        cursors = decode_cursor(page_id)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-    backends = await compile_backends(config, api_key)
-    candidates = [
-        backend for backend in backends if backend.healthy and (role is None or backend.role == role)
-    ]
-    unavailable = unavailable_backends(backends, role)
-
-    # ponytail: every request re-probes health and re-reads one page per
-    # backend, so a poll costs one fan-out per backend. Upgrade path is a
-    # short TTL cache keyed by the compiled backend set.
-    async with httpx.AsyncClient(timeout=LIST_TIMEOUT_SECONDS) as client:
-        walk = await read_walk(client, candidates, api_key, limit, cursors)
-
+    page = await merged_page(request, limit, page_id, role, api_key)
     return ConversationsResponse(
-        conversations=[ConversationRow.model_validate(row) for row in walk.conversations],
-        next_page_id=walk.next_page_id,
-        unavailable=unavailable + walk.unavailable,
+        conversations=[ConversationRow.model_validate(row) for row in page.walk.conversations],
+        next_page_id=page.walk.next_page_id,
+        unavailable=page.unavailable,
+    )
+
+
+async def list_agents(
+    request: Request,
+    limit: int = Query(default=CONVERSATION_PAGE_SIZE, ge=1, le=500),
+    page_id: str | None = Query(default=None),
+    role: BackendRole | None = Query(default=None),
+    api_key: str = Depends(require_api_key),
+) -> AgentsResponse:
+    """One merged agent list, projected to the fields the bridge renders.
+
+    The bridge's agent list reads the id, title, tags, status, timestamps,
+    workspace, launched profile, and last message id. The search page carries
+    the whole conversation record, about 28 KB per row, and a page of them over
+    the bridge's slow link costs tens of seconds. This route keeps the merge
+    walk and the cursor unchanged and drops the fields the list never reads, so
+    one page is about 1 KB per row. Rows, ordering, dedup, and the ``unavailable``
+    rule are the ones ``/api/discovery/conversations`` answers.
+    """
+    page = await merged_page(request, limit, page_id, role, api_key)
+    return AgentsResponse(
+        agents=[AgentListItem.model_validate(row) for row in page.walk.conversations],
+        next_page_id=page.walk.next_page_id,
+        unavailable=page.unavailable,
     )
 
 
@@ -234,10 +301,18 @@ async def list_automation_runs(
     )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Stop background page reads when the service shuts down."""
+    yield
+    await app.state.merged_pages.close()
+
+
 def create_app(config: DiscoveryConfig) -> FastAPI:
     """Build the service around one validated deployment configuration."""
-    app = FastAPI(title="Agent Canvas discovery")
+    app = FastAPI(title="Agent Canvas discovery", lifespan=lifespan)
     app.state.config = config
+    app.state.merged_pages = PageCache(fresh_ttl=PAGE_FRESH_SECONDS, stale_ttl=PAGE_STALE_SECONDS)
     app.middleware("http")(add_no_store_header)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -248,6 +323,12 @@ def create_app(config: DiscoveryConfig) -> FastAPI:
         list_conversations,
         methods=["GET"],
         response_model=ConversationsResponse,
+    )
+    app.add_api_route(
+        AGENTS_PATH,
+        list_agents,
+        methods=["GET"],
+        response_model=AgentsResponse,
     )
     app.add_api_route(
         AUTOMATION_RUNS_PATH,
