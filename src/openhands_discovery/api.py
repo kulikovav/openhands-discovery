@@ -38,6 +38,7 @@ from .runs import (
     read_run_pages,
     resolve_run_conversations,
     run_conversation_ids,
+    run_conversations,
     select_scan,
 )
 
@@ -218,12 +219,13 @@ async def list_automation_runs(
 
     Every merged row that owns a conversation also carries the conversation
     title and tags when the request selects chats (``has_conversation``) or one
-    run (``run_id``). The service reads them in batches from the runs server,
+    run (``run_id``), and the ids of every conversation the run owns, its own
+    id first. The service reads the state in batches from the runs server,
     which owns the conversations automation runs create, then from the ingress
     for an id the runs server did not answer. A batch that fails leaves its
     rows with an empty title and a null tag map, so the bridge reads that state
     itself instead of treating a missing answer as an unarchived chat. A plain
-    run table request skips the read, because it does not project a chat.
+    run table request skips both reads, because it does not project a chat.
     """
     config: DiscoveryConfig = request.app.state.config
     base_url = f"http://127.0.0.1:{config.ingress_port}"
@@ -253,25 +255,26 @@ async def list_automation_runs(
             if runs and (has_conversation or run_id):
                 records_port = config.runs_port or config.ingress_port
                 runs_base_url = f"http://127.0.0.1:{records_port}"
-                unresolved = [
-                    str(run.get("id", "") or "")
-                    for run in runs
-                    if not str(run.get("conversation_id", "") or "")
-                ]
-                if unresolved:
-                    resolved = await resolve_run_conversations(
-                        client,
-                        runs_base_url,
-                        base_url,
-                        api_key,
-                        unresolved,
-                    )
-                    for run in runs:
-                        if str(run.get("conversation_id", "") or ""):
-                            continue
-                        row_run_id = str(run.get("id", "") or "")
-                        if conversation_id := resolved.get(row_run_id):
-                            run["conversation_id"] = conversation_id
+                # The lookup covers every row, not only the rows whose record
+                # lost the id: a run can own more than one conversation, and
+                # only the conversation search names the others. The row's own
+                # id leads the list, so the chat row that existed before the
+                # list keeps its id.
+                resolved = await resolve_run_conversations(
+                    client,
+                    runs_base_url,
+                    base_url,
+                    api_key,
+                    [str(run.get("id", "") or "") for run in runs],
+                )
+                for run in runs:
+                    listed = resolved.get(str(run.get("id", "") or ""), [])
+                    own = str(run.get("conversation_id", "") or "")
+                    if not own and listed:
+                        own = listed[0]
+                        run["conversation_id"] = own
+                    if ordered := run_conversations(own, listed):
+                        run["conversation_ids"] = ordered
                 if has_conversation:
                     # A run with no resolvable conversation has no chat to
                     # open, so the chat page drops it after the lookup.

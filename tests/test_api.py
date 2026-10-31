@@ -216,8 +216,13 @@ def test_runs_merges_rows_and_attaches_chat_state(tmp_path, monkeypatch):
         assert runs_base_url == "http://127.0.0.1:8000"
         return {"c1": {"id": "c1", "title": "chat", "tags": {"archived": "true"}}}
 
+    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+        assert run_ids == ["r1"]
+        return {"r1": ["c1"]}
+
     monkeypatch.setattr(api, "fetch_automations", fake_fetch_automations)
     monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "resolve_run_conversations", fake_resolve)
     monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
     response = get(
         api.create_app(make_config(tmp_path)),
@@ -236,11 +241,58 @@ def test_runs_merges_rows_and_attaches_chat_state(tmp_path, monkeypatch):
             "created_at": "2026-10-02T00:00:00Z",
             "status": "RUNNING",
             "conversation_id": "c1",
+            "conversation_ids": ["c1"],
             "automation_name": "nightly",
             "conversation_title": "chat",
             "conversation_tags": {"archived": "true"},
         }
     ]
+
+
+def test_runs_attaches_every_conversation_a_run_owns(tmp_path, monkeypatch):
+    automation = {"id": "a1", "name": "nightly"}
+    page = AutomationRunsPage(
+        runs=[
+            {
+                "id": "r1",
+                "created_at": "2026-10-02T00:00:00Z",
+                "status": "COMPLETED",
+                "conversation_id": "c1",
+            }
+        ]
+    )
+    calls = {}
+
+    async def fake_fetch_automations(client, base_url, api_key):
+        return [automation]
+
+    async def fake_read_run_pages(client, base_url, api_key, automations, scan):
+        return RunReadResult(pages=[(automation, page)], unavailable=[])
+
+    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+        calls["run_ids"] = run_ids
+        return {"r1": ["c2", "c1"]}
+
+    async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
+        calls["conversation_ids"] = conversation_ids
+        return {}
+
+    monkeypatch.setattr(api, "fetch_automations", fake_fetch_automations)
+    monkeypatch.setattr(api, "read_run_pages", fake_read_run_pages)
+    monkeypatch.setattr(api, "resolve_run_conversations", fake_resolve)
+    monkeypatch.setattr(api, "fetch_run_conversation_records", fake_fetch_records)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/automation/runs",
+        headers=key_headers(),
+        params={"has_conversation": "true"},
+    )
+
+    assert response.status_code == 200
+    assert calls["run_ids"] == ["r1"]
+    assert calls["conversation_ids"] == ["c1", "c2"]
+    assert response.json()["runs"][0]["conversation_id"] == "c1"
+    assert response.json()["runs"][0]["conversation_ids"] == ["c1", "c2"]
 
 
 def test_runs_resolves_a_failed_run_whose_record_lost_the_conversation_id(tmp_path, monkeypatch):
@@ -266,7 +318,7 @@ def test_runs_resolves_a_failed_run_whose_record_lost_the_conversation_id(tmp_pa
     async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
         calls["run_ids"] = run_ids
         calls["runs_base_url"] = runs_base_url
-        return {"r1": "c1"}
+        return {"r1": ["c1"]}
 
     async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
         calls["conversation_ids"] = conversation_ids
@@ -293,6 +345,7 @@ def test_runs_resolves_a_failed_run_whose_record_lost_the_conversation_id(tmp_pa
             "created_at": "2026-10-02T00:00:00Z",
             "status": "FAILED",
             "conversation_id": "c1",
+            "conversation_ids": ["c1"],
             "automation_name": "nightly",
             "conversation_title": "failed chat",
             "conversation_tags": {},
@@ -316,7 +369,7 @@ def test_runs_run_lookup_repairs_a_lost_conversation_id(tmp_path, monkeypatch):
 
     async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
         calls["run_ids"] = run_ids
-        return {"r1": "c1"}
+        return {"r1": ["c1"]}
 
     async def fake_fetch_records(client, runs_base_url, ingress_base_url, api_key, conversation_ids):
         calls["conversation_ids"] = conversation_ids
@@ -342,6 +395,7 @@ def test_runs_run_lookup_repairs_a_lost_conversation_id(tmp_path, monkeypatch):
             "created_at": "2026-10-02T00:00:00Z",
             "status": "FAILED",
             "conversation_id": "c1",
+            "conversation_ids": ["c1"],
             "automation_name": "nightly",
             "conversation_title": "failed chat",
             "conversation_tags": {},

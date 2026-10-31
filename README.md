@@ -47,7 +47,12 @@ fan-out again.
 `run_id`, `status`, and `has_conversation`. `run_id` wins when a request sets
 both `run_id` and `has_conversation`. A failed or cancelled run that lost its
 `conversation_id` is resolved from the conversation `automationrunid` tag, so
-the chat page does not hide a conversation the deployment created.
+the chat page does not hide a conversation the deployment created. A request
+that selects chats or one run also carries `conversation_ids`, the ids of every
+conversation the run owns with the run's own id first: the run server starts a
+fresh conversation when it re-dispatches a run, and the run record keeps only
+one of them. The ids come from the conversation search window, so a
+conversation outside that window keeps the id the run record proved.
 
 A backend that contributes no rows, because its health probe failed or its
 read failed, appears in `unavailable`. An empty page therefore never hides a

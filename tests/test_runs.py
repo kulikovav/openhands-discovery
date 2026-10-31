@@ -268,7 +268,7 @@ def test_conversation_run_id_reads_the_tag_then_the_run_workspace():
     assert conversation_run_id({}) == ""
 
 
-def test_resolve_run_conversations_matches_tags_and_stops_when_found():
+def test_resolve_run_conversations_matches_tags_and_falls_back_to_the_ingress():
     requests = []
 
     def handler(request):
@@ -298,12 +298,61 @@ def test_resolve_run_conversations_matches_tags_and_stops_when_found():
 
     resolved = asyncio.run(run())
 
-    assert resolved == {"r1": "c1", "r2": "c2"}
+    assert resolved == {"r1": ["c1"], "r2": ["c2"]}
     assert [str(url) for url in requests] == [
         "http://127.0.0.1:8010/api/conversations/search?limit=100",
         "http://127.0.0.1:8010/api/conversations/search?limit=100&page_id=next",
         "http://127.0.0.1:8000/api/conversations/search?limit=100",
     ]
+
+
+def test_find_run_conversations_collects_every_conversation_of_a_run():
+    pages = []
+
+    def handler(request):
+        page_id = request.url.params.get("page_id", "")
+        pages.append(page_id)
+        if not page_id:
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "c1", "tags": {AUTOMATION_RUN_TAG: "r1"}},
+                        {"id": "c2", "tags": {AUTOMATION_RUN_TAG: "r2"}},
+                    ],
+                    "next_page_id": "next",
+                },
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"id": "c3", "workspace": {"working_dir": "/x/automation-runs/r1"}},
+                    {"id": "c1", "tags": {AUTOMATION_RUN_TAG: "r1"}},
+                ],
+                "next_page_id": None,
+            },
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1", "r2"})
+
+    assert asyncio.run(run()) == {"r1": ["c1", "c3"], "r2": ["c2"]}
+    assert pages == ["", "next"]
+
+
+def test_run_conversation_ids_lead_with_the_runs_own_conversation():
+    runs = [
+        {"conversation_id": "c1", "conversation_ids": ["c2", "c1"]},
+        {"conversation_ids": ["c3"]},
+        {"conversation_id": "c1"},
+        {"conversation_ids": "not a list"},
+    ]
+
+    assert run_conversation_ids(runs) == ["c1", "c2", "c3"]
 
 
 def test_find_run_conversations_stops_at_the_page_bound():

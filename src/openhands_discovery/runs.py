@@ -29,8 +29,9 @@ MERGED_RUN_LIMIT = 100
 RUN_PAGE_SIZE = 100
 CONVERSATION_RECORD_BATCH_SIZE = 40
 # The conversation lookup follows this many search pages per backend at most.
-# It serves a run whose record lost the conversation id, so the bound keeps a
-# long-lived deployment from turning one chat list read into a full scan.
+# It serves every run of a chat page or a run lookup, because a run can own
+# more than one conversation, so the bound keeps a long-lived deployment from
+# turning one chat list read into a full scan.
 RUN_CONVERSATION_PAGE_LIMIT = 20
 # A failed or cancelled run can own a conversation the deployment did not link
 # back to the run. A completed run is not a candidate: a scheduled check that
@@ -383,15 +384,16 @@ async def resolve_run_conversations(
     ingress_base_url: str,
     api_key: str,
     run_ids: list[str],
-) -> dict[str, str]:
-    """Resolve the conversation of each run whose record lost the id.
+) -> dict[str, list[str]]:
+    """Resolve every conversation each run owns.
 
     The deployment answers no lookup by run id, so the read walks the
-    conversation search newest first and matches the ``automationrunid`` tag or
-    the run workspace. The runs server owns the conversations automation runs
-    create; the ingress covers an older conversation that server does not
-    hold. The walk is bounded per backend, so a run with no conversation costs
-    at most that bound and is then dropped by the caller.
+    conversation search and matches the ``automationrunid`` tag or the run
+    workspace. The runs server owns the conversations automation runs create;
+    a run that server names in no conversation is looked up on the ingress,
+    which can serve a conversation the runs server does not hold. The walk is
+    bounded per backend, so a conversation outside the search window is not
+    found and the caller keeps the id the run record proved.
     """
     wanted = {run_id for run_id in run_ids if run_id}
     if not wanted:
@@ -408,11 +410,23 @@ async def find_run_conversations(
     base_url: str,
     api_key: str,
     run_ids: set[str],
-) -> dict[str, str]:
-    """Find the conversations of the given runs on one backend."""
+) -> dict[str, list[str]]:
+    """Find every conversation of the given runs on one backend.
+
+    The walk covers the whole search window, because a run can own more than
+    one conversation and a first match proves nothing about the others: the
+    run server starts a fresh conversation when it re-dispatches a run, and
+    the run record keeps only one of them. The bound keeps a long-lived
+    deployment from turning one chat list read into a full scan.
+    """
     if not run_ids:
         return {}
-    resolved: dict[str, str] = {}
+    # ponytail: the walk covers the whole window, because a run can own more
+    # than one conversation and a first match proves nothing about the others.
+    # A deployment with a large conversation catalog pays the page bound on
+    # every chat read; the upgrade path is a deployment-side run index, or a
+    # per-run conversation tag the read can filter on.
+    resolved: dict[str, list[str]] = {}
     page_id = ""
     for _ in range(RUN_CONVERSATION_PAGE_LIMIT):
         params: dict[str, Any] = {"limit": CONVERSATION_PAGE_SIZE}
@@ -421,9 +435,9 @@ async def find_run_conversations(
         try:
             payload = await fetch_json(client, f"{base_url}{CONVERSATION_SEARCH_PATH}", api_key, params)
         except (httpx.HTTPError, ValueError):
-            # The id lookup is a repair beside the run page, not a source of
-            # it: a search that fails leaves the rows the run read already
-            # proved, and the caller drops only the unresolved candidates.
+            # A search that fails leaves the rows with the id their run record
+            # proved: the lookup adds conversations, so its failure costs the
+            # extras, not the chats the run read already named.
             break
         items = payload.get("items")
         if not isinstance(items, list) or not items:
@@ -432,13 +446,14 @@ async def find_run_conversations(
             if not isinstance(item, dict):
                 continue
             run_id = conversation_run_id(item)
-            if run_id not in run_ids or run_id in resolved:
+            if run_id not in run_ids:
                 continue
             conversation_id = str(item.get("id", "") or "")
-            if conversation_id:
-                resolved[run_id] = conversation_id
-        if len(resolved) == len(run_ids):
-            break
+            if not conversation_id:
+                continue
+            found = resolved.setdefault(run_id, [])
+            if conversation_id not in found:
+                found.append(conversation_id)
         page_id = str(payload.get("next_page_id", "") or "")
         if not page_id:
             break
@@ -450,20 +465,40 @@ def run_by_id(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, Any]]:
     return [run for run in rows if str(run.get("id", "") or "") == run_id]
 
 
+def run_conversations(own: str, listed: list[str] | None) -> list[str]:
+    """Every conversation of one run, its own id first.
+
+    The run's own ``conversation_id`` leads, so the chat row that existed
+    before ``conversation_ids`` keeps its id and its saved state. The ids the
+    conversation search answered follow, and a repeated value is dropped.
+    """
+    ordered = [own] if own else []
+    if not isinstance(listed, list):
+        return ordered
+    for value in listed:
+        conversation_id = str(value or "")
+        if conversation_id and conversation_id not in ordered:
+            ordered.append(conversation_id)
+    return ordered
+
+
 def run_conversation_ids(runs: list[dict[str, Any]]) -> list[str]:
     """The unique conversation ids of the merged run rows, in row order.
 
-    A duplicate id is read once, because several runs can point at one
-    conversation only when the deployment stored a repeated row.
+    A duplicate id is read once. Two runs can name one conversation when a
+    retry reuses it, and the record read must not fetch it twice.
     """
     ids: list[str] = []
     seen: set[str] = set()
     for run in runs:
-        conversation_id = str(run.get("conversation_id", "") or "")
-        if not conversation_id or conversation_id in seen:
-            continue
-        seen.add(conversation_id)
-        ids.append(conversation_id)
+        for conversation_id in run_conversations(
+            str(run.get("conversation_id", "") or ""),
+            run.get("conversation_ids"),
+        ):
+            if conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            ids.append(conversation_id)
     return ids
 
 
