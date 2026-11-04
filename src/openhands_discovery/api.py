@@ -14,6 +14,7 @@ from .backends import compile_backends, unavailable_backends
 from .cache import PageCache
 from .config import DiscoveryConfig
 from .conversations import CONVERSATION_PAGE_SIZE, ConversationWalk, decode_cursor, read_walk
+from .index import ConversationIndex
 from .models import (
     AgentListItem,
     AgentsResponse,
@@ -50,6 +51,10 @@ PAGE_FRESH_SECONDS = 5.0
 # so a slow fan-out cannot stall the list. A page older than this waits for a
 # new read again.
 PAGE_STALE_SECONDS = 60.0
+# The walk window the sqlite conversation index serves without a walk. It
+# matches the stale window of the merged pages, which the bridge already
+# tolerates.
+INDEX_FRESH_SECONDS = 60.0
 HEALTH_PATH = "/health"
 BACKENDS_PATH = "/api/discovery/backends"
 CONVERSATIONS_PATH = "/api/discovery/conversations"
@@ -226,6 +231,12 @@ async def list_automation_runs(
     rows with an empty title and a null tag map, so the bridge reads that state
     itself instead of treating a missing answer as an unarchived chat. A plain
     run table request skips both reads, because it does not project a chat.
+
+    The run conversation lookup answers from the sqlite conversation index
+    inside the index's fresh window, which one search walk per window
+    refreshes. A cold first read, a walk that failed, or an index that is
+    disabled or cannot open its file walks the search before answering, the way
+    a deployment without an index always does.
     """
     config: DiscoveryConfig = request.app.state.config
     base_url = f"http://127.0.0.1:{config.ingress_port}"
@@ -261,6 +272,7 @@ async def list_automation_runs(
                 # id leads the list, so the chat row that existed before the
                 # list keeps its id.
                 resolved = await resolve_run_conversations(
+                    request.app.state.conversation_index,
                     client,
                     runs_base_url,
                     base_url,
@@ -306,9 +318,10 @@ async def list_automation_runs(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Stop background page reads when the service shuts down."""
+    """Stop background page reads and index walks when the service shuts down."""
     yield
     await app.state.merged_pages.close()
+    await app.state.conversation_index.close()
 
 
 def create_app(config: DiscoveryConfig) -> FastAPI:
@@ -316,6 +329,7 @@ def create_app(config: DiscoveryConfig) -> FastAPI:
     app = FastAPI(title="Agent Canvas discovery", lifespan=lifespan)
     app.state.config = config
     app.state.merged_pages = PageCache(fresh_ttl=PAGE_FRESH_SECONDS, stale_ttl=PAGE_STALE_SECONDS)
+    app.state.conversation_index = ConversationIndex(config.index_path, fresh_seconds=INDEX_FRESH_SECONDS)
     app.middleware("http")(add_no_store_header)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)

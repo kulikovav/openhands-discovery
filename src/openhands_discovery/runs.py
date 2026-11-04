@@ -15,6 +15,11 @@ from typing import Any, Protocol
 import httpx
 
 from .conversations import CONVERSATION_PAGE_SIZE
+from .index import (
+    ConversationIndex,
+    IndexedConversation,
+    RunConversationWalk,
+)
 from .models import UnavailableAutomation, text_tags
 from .upstream import API_KEY_HEADER, fetch_json
 
@@ -28,10 +33,12 @@ AUTOMATION_RUN_TAG = "automationrunid"
 MERGED_RUN_LIMIT = 100
 RUN_PAGE_SIZE = 100
 CONVERSATION_RECORD_BATCH_SIZE = 40
-# The conversation lookup follows this many search pages per backend at most.
+# The conversation walk follows this many search pages per backend at most.
 # It serves every run of a chat page or a run lookup, because a run can own
 # more than one conversation, so the bound keeps a long-lived deployment from
-# turning one chat list read into a full scan.
+# turning one chat list read into a full scan. With the index enabled and a
+# store that works, one complete walk per source runs at most once per fresh
+# window instead of once per read; the bound is still what stops one walk.
 RUN_CONVERSATION_PAGE_LIMIT = 20
 # A failed or cancelled run can own a conversation the deployment did not link
 # back to the run. A completed run is not a candidate: a scheduled check that
@@ -379,6 +386,7 @@ def conversation_run_id(conversation: dict[str, Any]) -> str:
 
 
 async def resolve_run_conversations(
+    index: ConversationIndex,
     client: httpx.AsyncClient,
     runs_base_url: str,
     ingress_base_url: str,
@@ -387,47 +395,58 @@ async def resolve_run_conversations(
 ) -> dict[str, list[str]]:
     """Resolve every conversation each run owns.
 
-    The deployment answers no lookup by run id, so the read walks the
-    conversation search and matches the ``automationrunid`` tag or the run
-    workspace. The runs server owns the conversations automation runs create;
-    a run that server names in no conversation is looked up on the ingress,
-    which can serve a conversation the runs server does not hold. The walk is
-    bounded per backend, so a conversation outside the search window is not
-    found and the caller keeps the id the run record proved.
+    The deployment answers no lookup by run id, so the sqlite conversation
+    index answers from the rows its walks recorded, and its walk matches the
+    ``automationrunid`` tag or the run workspace. The index module owns the
+    cold, stale, and fresh rules. A conversation outside a walk's page bound is
+    answered from a row a walk once saw. The runs server owns the conversations
+    automation runs create; a run that server names in no conversation is looked
+    up on the ingress, which can serve a conversation the runs server does not
+    hold. A run whose conversation no walk has seen keeps the id its run record
+    proved.
     """
     wanted = {run_id for run_id in run_ids if run_id}
     if not wanted:
         return {}
-    resolved = await find_run_conversations(client, runs_base_url, api_key, wanted)
-    if len(resolved) < len(wanted) and runs_base_url != ingress_base_url:
-        missing = wanted - set(resolved)
-        resolved.update(await find_run_conversations(client, ingress_base_url, api_key, missing))
+    resolved = await index.resolve(
+        runs_base_url,
+        wanted,
+        lambda: walk_run_conversations(client, runs_base_url, api_key, wanted),
+    )
+    missing = wanted - set(resolved)
+    if missing and runs_base_url != ingress_base_url:
+        resolved.update(
+            await index.resolve(
+                ingress_base_url,
+                missing,
+                lambda: walk_run_conversations(client, ingress_base_url, api_key, missing),
+            )
+        )
     return resolved
 
 
-async def find_run_conversations(
+async def walk_run_conversations(
     client: httpx.AsyncClient,
     base_url: str,
     api_key: str,
     run_ids: set[str],
-) -> dict[str, list[str]]:
-    """Find every conversation of the given runs on one backend.
+) -> RunConversationWalk:
+    """Walk the bounded search of one backend and capture every conversation row.
 
-    The walk covers the whole search window, because a run can own more than
-    one conversation and a first match proves nothing about the others: the
-    run server starts a fresh conversation when it re-dispatches a run, and
-    the run record keeps only one of them. The bound keeps a long-lived
-    deployment from turning one chat list read into a full scan.
+    The walk covers the whole bounded search window, because a run can own more
+    than one conversation and a first match proves nothing about the others:
+    the run server starts a fresh conversation when it re-dispatches a run, and
+    the run record keeps only one of them. Every visited row is returned with
+    the run id its tag or workspace names, because each caller projects its own
+    run conversation answer from them and the caller feeds every walked page
+    into the conversation index. Calling with no wanted run ids walks nothing.
     """
     if not run_ids:
-        return {}
-    # ponytail: the walk covers the whole window, because a run can own more
-    # than one conversation and a first match proves nothing about the others.
-    # A deployment with a large conversation catalog pays the page bound on
-    # every chat read; the upgrade path is a deployment-side run index, or a
-    # per-run conversation tag the read can filter on.
-    resolved: dict[str, list[str]] = {}
+        return RunConversationWalk()
+    rows: list[IndexedConversation] = []
     page_id = ""
+    failed = False
+    reached_end = False
     for _ in range(RUN_CONVERSATION_PAGE_LIMIT):
         params: dict[str, Any] = {"limit": CONVERSATION_PAGE_SIZE}
         if page_id:
@@ -438,26 +457,40 @@ async def find_run_conversations(
             # A search that fails leaves the rows with the id their run record
             # proved: the lookup adds conversations, so its failure costs the
             # extras, not the chats the run read already named.
+            failed = True
             break
         items = payload.get("items")
-        if not isinstance(items, list) or not items:
+        # The cursor is read before the row list: an empty page that still
+        # carries a cursor is not the search's last page, and claiming it
+        # would let the index drop every row of the source.
+        page_id = str(payload.get("next_page_id", "") or "")
+        if not isinstance(items, list):
+            failed = True
+            break
+        if not items and not page_id:
+            reached_end = True
             break
         for item in items:
             if not isinstance(item, dict):
                 continue
-            run_id = conversation_run_id(item)
-            if run_id not in run_ids:
-                continue
             conversation_id = str(item.get("id", "") or "")
             if not conversation_id:
                 continue
-            found = resolved.setdefault(run_id, [])
-            if conversation_id not in found:
-                found.append(conversation_id)
-        page_id = str(payload.get("next_page_id", "") or "")
+            rows.append(
+                IndexedConversation(
+                    conversation_id=conversation_id,
+                    run_id=conversation_run_id(item),
+                    updated_at=str(item.get("updated_at", "") or ""),
+                )
+            )
         if not page_id:
+            reached_end = True
             break
-    return resolved
+    return RunConversationWalk(
+        rows=rows,
+        complete=not failed,
+        reached_end=reached_end,
+    )
 
 
 def run_by_id(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, Any]]:

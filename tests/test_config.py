@@ -36,6 +36,19 @@ def test_load_config_leaves_the_runs_backend_out_without_both_keys(tmp_path):
     assert config.runs_configured is False
 
 
+def test_load_config_leaves_the_index_disabled_without_the_key(tmp_path):
+    config = load_config(write_config(tmp_path))
+
+    assert config.index_path is None
+
+
+def test_load_config_reads_the_index_path(tmp_path):
+    path = str(tmp_path / "index.sqlite3")
+    config = load_config(write_config(tmp_path, index_path=path))
+
+    assert config.index_path == path
+
+
 def test_load_config_rejects_a_missing_key(tmp_path):
     path = write_config(tmp_path)
     data = json.loads(path.read_text(encoding="utf-8"))

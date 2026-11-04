@@ -6,6 +6,7 @@ import pytest
 from openhands_discovery import api
 from openhands_discovery.config import DiscoveryConfig
 from openhands_discovery.conversations import CONVERSATION_PAGE_SIZE, ConversationWalk
+from openhands_discovery.index import ConversationIndex
 from openhands_discovery.models import BackendEntry, BackendRole, UnavailableBackend
 from openhands_discovery.runs import AutomationRunsPage, ChatRuns, RunReadResult, SingleRun
 
@@ -20,6 +21,7 @@ def make_config(tmp_path, key="secret", **overrides):
         "listen_port": 18080,
         "quadlet_dir": str(tmp_path / "quadlet"),
         "slot_public_host_prefix": "b",
+        "index_path": str(tmp_path / "conversations.sqlite3"),
     }
     values.update(overrides)
     return DiscoveryConfig(**values)
@@ -216,7 +218,8 @@ def test_runs_merges_rows_and_attaches_chat_state(tmp_path, monkeypatch):
         assert runs_base_url == "http://127.0.0.1:8000"
         return {"c1": {"id": "c1", "title": "chat", "tags": {"archived": "true"}}}
 
-    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+    async def fake_resolve(index, client, runs_base_url, ingress_base_url, api_key, run_ids):
+        assert isinstance(index, ConversationIndex)
         assert run_ids == ["r1"]
         return {"r1": ["c1"]}
 
@@ -269,7 +272,7 @@ def test_runs_attaches_every_conversation_a_run_owns(tmp_path, monkeypatch):
     async def fake_read_run_pages(client, base_url, api_key, automations, scan):
         return RunReadResult(pages=[(automation, page)], unavailable=[])
 
-    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+    async def fake_resolve(index, client, runs_base_url, ingress_base_url, api_key, run_ids):
         calls["run_ids"] = run_ids
         return {"r1": ["c2", "c1"]}
 
@@ -315,7 +318,7 @@ def test_runs_resolves_a_failed_run_whose_record_lost_the_conversation_id(tmp_pa
     async def fake_read_run_pages(client, base_url, api_key, automations, scan):
         return RunReadResult(pages=[(automation, page)], unavailable=[])
 
-    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+    async def fake_resolve(index, client, runs_base_url, ingress_base_url, api_key, run_ids):
         calls["run_ids"] = run_ids
         calls["runs_base_url"] = runs_base_url
         return {"r1": ["c1"]}
@@ -367,7 +370,7 @@ def test_runs_run_lookup_repairs_a_lost_conversation_id(tmp_path, monkeypatch):
         assert isinstance(scan, SingleRun)
         return RunReadResult(pages=[(automation, page)], unavailable=[])
 
-    async def fake_resolve(client, runs_base_url, ingress_base_url, api_key, run_ids):
+    async def fake_resolve(index, client, runs_base_url, ingress_base_url, api_key, run_ids):
         calls["run_ids"] = run_ids
         return {"r1": ["c1"]}
 

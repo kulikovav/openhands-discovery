@@ -17,6 +17,10 @@ class DiscoveryConfig(BaseModel):
     The backend names are display identifiers, because the bridge selects a
     backend by its role. The deployment can rename them; a document from before
     they were configurable keeps the defaults.
+
+    ``index_path`` is optional: the sqlite conversation index stays disabled
+    while the key is unset, and a chat read then walks the conversation search,
+    the way it did before the index existed.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
@@ -33,6 +37,7 @@ class DiscoveryConfig(BaseModel):
     scheme: str = "https"
     runs_port: int | None = None
     runs_public_host: str | None = None
+    index_path: str | None = None
 
     @property
     def public_root(self) -> str:

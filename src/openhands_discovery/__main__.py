@@ -1,6 +1,9 @@
 """Command line entry point."""
 
+import asyncio
+import os
 import sys
+import tempfile
 
 import uvicorn
 
@@ -9,6 +12,7 @@ from .auth import keys_match
 from .backends import unavailable_backends
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .conversations import decode_cursor, encode_cursor, merge_conversations
+from .index import ConversationIndex, IndexedConversation, RunConversationWalk
 from .models import BackendEntry, BackendRole
 from .runs import AutomationRunsPage, ChatRuns, SingleRun, merge_runs, select_scan
 
@@ -16,7 +20,7 @@ LISTEN_HOST = "127.0.0.1"
 
 
 def self_check() -> None:
-    """Assert the pure domain helpers. Run with --self-check.
+    """Assert the domain rules, including the index round trip. Run with --self-check.
 
     The deployment verification runs this check on the host. The pytest suite
     covers the same rules with more cases.
@@ -81,6 +85,40 @@ def self_check() -> None:
     assert [entry.name for entry in unavailable] == ["backend-1"], unavailable
     assert keys_match("secret", "secret")
     assert not keys_match("wrong", "secret")
+
+    async def check_index() -> None:
+        """Check the index rules: cold serve, stale serve, and the reached-end drop."""
+        with tempfile.TemporaryDirectory() as scratch:
+            index = ConversationIndex(os.path.join(scratch, "index.sqlite3"), fresh_seconds=0)
+            first_walk = RunConversationWalk(
+                rows=[
+                    IndexedConversation(conversation_id="c1", run_id="r1", updated_at="2026-10-01T00:00:00Z"),
+                ],
+                complete=True,
+                reached_end=True,
+            )
+            last_walk = RunConversationWalk(
+                rows=[IndexedConversation(conversation_id="c3", run_id="r2", updated_at="2026-10-03T00:00:00Z")],
+                complete=True,
+                reached_end=True,
+            )
+
+            async def walk_first() -> RunConversationWalk:
+                return first_walk
+
+            async def walk_last() -> RunConversationWalk:
+                return last_walk
+
+            cold = await index.resolve("runs", {"r1"}, walk_first)
+            assert cold == {"r1": ["c1"]}, cold
+            stale = await index.resolve("runs", {"r1", "r2"}, walk_last)
+            assert stale == {"r1": ["c1"]}, stale
+            await index.walks["runs"]
+            dropped = await index.resolve("runs", {"r1", "r2"}, walk_last)
+            assert dropped == {"r2": ["c3"]}, dropped
+            await index.close()
+
+    asyncio.run(check_index())
     print("self-check passed")
 
 

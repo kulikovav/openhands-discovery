@@ -51,8 +51,17 @@ the chat page does not hide a conversation the deployment created. A request
 that selects chats or one run also carries `conversation_ids`, the ids of every
 conversation the run owns with the run's own id first: the run server starts a
 fresh conversation when it re-dispatches a run, and the run record keeps only
-one of them. The ids come from the conversation search window, so a
-conversation outside that window keeps the id the run record proved.
+one of them. The ids come from the conversation search plus the sqlite
+conversation index: the walk that resolves them also records every conversation
+it visits with the run id its tag or workspace names, and a read inside the
+index's fresh window answers from those rows without a walk. A cold index walks
+before it answers, and a stale one answers from its rows while one background
+walk refreshes them, so a conversation the deployment created reaches the
+answers within the window. A dropped conversation leaves the index once a walk
+that reaches the search's last page passes its place; on a catalog larger than
+that bound, a dropped conversation stays in the index until the catalog shrinks
+inside the bound. A conversation that no walk has seen keeps the id the run
+record proved.
 
 A backend that contributes no rows, because its health probe failed or its
 read failed, appears in `unavailable`. An empty page therefore never hides a
@@ -77,7 +86,8 @@ The deployment verification runs the domain self-check on the host:
 .venv/bin/openhands-discovery --self-check
 ```
 
-It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
+It prints `self-check passed` when the merge, cursor, scan, and conversation
+index rules hold.
 
 ## Configuration
 
@@ -110,6 +120,7 @@ It prints `self-check passed` when the pure merge, cursor, and scan rules hold.
 | `runs_port` | The loopback port of the automation runs server. Optional. |
 | `runs_public_host` | The public host name of the automation runs server. Optional. |
 | `scheme` | The public URL scheme. Default is `https`. |
+| `index_path` | The file of the sqlite conversation index that backs the run chat lookup. Optional; without it every chat read walks the conversation search. A file the service cannot open disables the index, with a warning in the service log, and the reads walk. |
 | `slot_name_prefix` | Prefix of a slot's display name, followed by its number. Default is `backend-`. |
 | `slot_public_host_prefix` | The public host name prefix of the cloud-agent slots. Slot N answers on `<prefix>N.<domain>`. |
 
@@ -126,6 +137,14 @@ The code models the deployment rules as data:
 - `runs.RunScan` is the scan strategy of one request. `NewestRuns`,
   `ChatRuns`, and `SingleRun` implement it. `select_scan` holds the precedence
   rule in one place.
+- `index.ConversationIndex` is the sqlite index behind the run chat lookup. It
+  stores every conversation a search walk visits, answers a lookup inside its
+  fresh window without a walk, serves its rows while one walk refreshes them,
+  and drops the rows a walk to the search's last page did not see. A file it
+  cannot open leaves it disabled.
+- `index.RunConversationWalk` is the answer of one search walk: every visited
+  row for the index and for the caller's own run conversation projection, plus
+  whether the walk read to its bound or to the search's last page.
 - `conversations.ConversationWalk` is the answer of one walk step: rows, the
   next cursor, and the backends that failed.
 - `config.DiscoveryConfig` validates the document at start, so a bad
@@ -147,6 +166,7 @@ src/openhands_discovery/
   cache.py          merged page cache with a fresh window and stale serving
   config.py         typed configuration
   conversations.py  conversation walk, cursor, merge
+  index.py          sqlite conversation index behind the run chat lookup
   models.py         response models and backend roles
   runs.py           run scans, merge, chat projection
   upstream.py       shared upstream JSON read and the key header

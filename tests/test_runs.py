@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 
+from openhands_discovery.index import ConversationIndex, IndexedConversation
 from openhands_discovery.runs import (
     AUTOMATION_RUN_TAG,
     RUN_PAGE_SIZE,
@@ -15,7 +16,6 @@ from openhands_discovery.runs import (
     conversation_run_id,
     fetch_conversation_records,
     fetch_run_conversation_records,
-    find_run_conversations,
     merge_runs,
     newest_automations,
     read_run_pages,
@@ -23,6 +23,7 @@ from openhands_discovery.runs import (
     run_by_id,
     run_conversation_ids,
     select_scan,
+    walk_run_conversations,
 )
 
 
@@ -287,8 +288,10 @@ def test_resolve_run_conversations_matches_tags_and_falls_back_to_the_ingress():
         )
 
     async def run():
+        index = ConversationIndex(None, fresh_seconds=60.0)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             return await resolve_run_conversations(
+                index,
                 client,
                 "http://127.0.0.1:8010",
                 "http://127.0.0.1:8000",
@@ -306,7 +309,7 @@ def test_resolve_run_conversations_matches_tags_and_falls_back_to_the_ingress():
     ]
 
 
-def test_find_run_conversations_collects_every_conversation_of_a_run():
+def test_walk_run_conversations_collects_every_conversation_of_a_run():
     pages = []
 
     def handler(request):
@@ -338,10 +341,63 @@ def test_find_run_conversations_collects_every_conversation_of_a_run():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1", "r2"})
+            return await walk_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1", "r2"})
 
-    assert asyncio.run(run()) == {"r1": ["c1", "c3"], "r2": ["c2"]}
+    walked = asyncio.run(run())
+
+    assert walked.complete is True
+    assert walked.reached_end is True
+    assert walked.rows == [
+        IndexedConversation(conversation_id="c1", run_id="r1"),
+        IndexedConversation(conversation_id="c2", run_id="r2"),
+        IndexedConversation(conversation_id="c3", run_id="r1"),
+        IndexedConversation(conversation_id="c1", run_id="r1"),
+    ]
     assert pages == ["", "next"]
+
+
+def test_walk_run_conversations_ends_on_an_empty_page_without_a_cursor():
+    def handler(request):
+        return httpx.Response(200, json={"items": [], "next_page_id": None}, request=request)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await walk_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1"})
+
+    walked = asyncio.run(run())
+
+    assert walked.complete is True
+    assert walked.reached_end is True
+    assert walked.rows == []
+
+
+def test_walk_run_conversations_does_not_claim_the_end_on_an_empty_page_with_a_cursor():
+    pages = []
+
+    def handler(request):
+        page_id = request.url.params.get("page_id", "")
+        pages.append(page_id)
+        if not page_id:
+            return httpx.Response(200, json={"items": [], "next_page_id": "more"}, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "items": [{"id": "c1", "tags": {AUTOMATION_RUN_TAG: "r1"}}],
+                "next_page_id": None,
+            },
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await walk_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1"})
+
+    walked = asyncio.run(run())
+
+    assert walked.complete is True
+    assert walked.reached_end is True
+    assert walked.rows == [IndexedConversation(conversation_id="c1", run_id="r1")]
+    assert pages == ["", "more"]
 
 
 def test_run_conversation_ids_lead_with_the_runs_own_conversation():
@@ -355,7 +411,7 @@ def test_run_conversation_ids_lead_with_the_runs_own_conversation():
     assert run_conversation_ids(runs) == ["c1", "c2", "c3"]
 
 
-def test_find_run_conversations_stops_at_the_page_bound():
+def test_walk_run_conversations_stops_at_the_page_bound():
     pages = []
 
     def handler(request):
@@ -369,13 +425,17 @@ def test_find_run_conversations_stops_at_the_page_bound():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"missing"})
+            return await walk_run_conversations(client, "http://127.0.0.1:8010", "key", {"missing"})
 
-    assert asyncio.run(run()) == {}
+    walked = asyncio.run(run())
+
+    assert walked.complete is True
+    assert walked.reached_end is False
+    assert walked.rows == [IndexedConversation(conversation_id="c1", run_id="")] * 20
     assert len(pages) == 20
 
 
-def test_find_run_conversations_treats_a_failed_search_as_no_match():
+def test_walk_run_conversations_treats_a_failed_search_as_no_match():
     requests = []
 
     def handler(request):
@@ -384,9 +444,13 @@ def test_find_run_conversations_treats_a_failed_search_as_no_match():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await find_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1"})
+            return await walk_run_conversations(client, "http://127.0.0.1:8010", "key", {"r1"})
 
-    assert asyncio.run(run()) == {}
+    walked = asyncio.run(run())
+
+    assert walked.complete is False
+    assert walked.reached_end is False
+    assert walked.rows == []
     assert len(requests) == 1
 
 

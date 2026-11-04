@@ -125,7 +125,8 @@ class RunRow(BaseModel):
     # run can own more than one: the run server starts a fresh conversation
     # when it re-dispatches a run, and the run record keeps only one of them.
     # The list is absent against a plain run table request, and it carries the
-    # run's own id alone when the search window does not name the others.
+    # run's own id alone when neither the run record nor a walked conversation
+    # row names the others.
     conversation_ids: list[str] = Field(default_factory=list)
     # The conversation state of a run that owns one. The fields stay empty
     # when the record read failed or the run owns no conversation, so the
