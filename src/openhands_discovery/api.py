@@ -27,6 +27,7 @@ from .models import (
     UnavailableAutomation,
     UnavailableBackend,
 )
+from .probe import ProbeCircuits
 from .runs import (
     AUTOMATION_SCAN_LIMIT,
     MERGED_RUN_LIMIT,
@@ -93,7 +94,8 @@ async def list_backends(
 ) -> BackendsResponse:
     """The compiled backend list."""
     config: DiscoveryConfig = request.app.state.config
-    return BackendsResponse(backends=await compile_backends(config, api_key))
+    circuits: ProbeCircuits = request.app.state.probe_circuits
+    return BackendsResponse(backends=await compile_backends(config, api_key, circuits))
 
 
 @dataclass(frozen=True)
@@ -119,7 +121,8 @@ async def merged_page(
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     async def read() -> MergedPage:
-        backends = await compile_backends(config, api_key)
+        circuits: ProbeCircuits = request.app.state.probe_circuits
+        backends = await compile_backends(config, api_key, circuits)
         candidates = [
             backend for backend in backends if backend.healthy and (role is None or backend.role == role)
         ]
@@ -328,6 +331,7 @@ def create_app(config: DiscoveryConfig) -> FastAPI:
     """Build the service around one validated deployment configuration."""
     app = FastAPI(title="Agent Canvas discovery", lifespan=lifespan)
     app.state.config = config
+    app.state.probe_circuits = ProbeCircuits()
     app.state.merged_pages = PageCache(fresh_ttl=PAGE_FRESH_SECONDS, stale_ttl=PAGE_STALE_SECONDS)
     app.state.conversation_index = ConversationIndex(config.index_path, fresh_seconds=INDEX_FRESH_SECONDS)
     app.middleware("http")(add_no_store_header)

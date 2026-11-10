@@ -71,8 +71,9 @@ def test_backends_requires_the_deployment_key(tmp_path):
 def test_backends_returns_the_compiled_list(tmp_path, monkeypatch):
     entry = make_backend("canvas", BackendRole.INGRESS, 8000)
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         assert api_key == "secret"
+        assert circuits is not None
         return [entry]
 
     monkeypatch.setattr(api, "compile_backends", fake_compile)
@@ -129,7 +130,7 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
         error="the health endpoint is unreachable",
     )
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         return [ingress, slot]
 
     async def fake_walk(client, backends, api_key, limit, cursors):
@@ -467,7 +468,7 @@ def test_runs_plain_table_skips_the_chat_read(tmp_path, monkeypatch):
 
 
 def test_key_rotation_applies_to_the_next_request(tmp_path, monkeypatch):
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         return []
 
     monkeypatch.setattr(api, "compile_backends", fake_compile)
@@ -554,7 +555,7 @@ def test_runs_narrows_to_one_automation_and_resolves_a_run(tmp_path, monkeypatch
 def test_agents_route_keeps_only_the_list_fields(tmp_path, monkeypatch):
     ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         return [ingress]
 
     async def fake_walk(client, backends, api_key, limit, cursors):
@@ -604,7 +605,7 @@ def test_list_routes_share_one_read_inside_the_cache_window(tmp_path, monkeypatc
     ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
     calls = {"compile": 0, "walk": 0}
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         calls["compile"] += 1
         return [ingress]
 
@@ -628,7 +629,7 @@ def test_list_route_serves_the_last_page_while_a_refresh_runs(tmp_path, monkeypa
     release = asyncio.Event()
     finished = asyncio.Event()
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         return [ingress]
 
     async def fake_walk(client, backends, api_key, limit, cursors):
@@ -681,7 +682,7 @@ def test_list_route_does_not_retain_a_page_above_the_default_limit(tmp_path, mon
     ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
     walks = 0
 
-    async def fake_compile(config, api_key):
+    async def fake_compile(config, api_key, circuits):
         return [ingress]
 
     async def fake_walk(client, backends, api_key, limit, cursors):

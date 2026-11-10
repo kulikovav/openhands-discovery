@@ -2,10 +2,11 @@ import asyncio
 
 import httpx
 
-from openhands_discovery import backends
+from openhands_discovery import backends, probe
 from openhands_discovery.backends import build_targets, compile_backends, slot_ports, unavailable_backends
 from openhands_discovery.config import DiscoveryConfig
 from openhands_discovery.models import BackendEntry, BackendRole
+from openhands_discovery.probe import ProbeCircuits, retry_backoff_seconds
 
 
 def make_config(tmp_path, **overrides):
@@ -182,7 +183,7 @@ def test_compile_backends_reports_the_ingress_version_only(tmp_path, monkeypatch
     monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
     monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
 
-    entries = asyncio.run(compile_backends(config, "secret"))
+    entries = asyncio.run(compile_backends(config, "secret", ProbeCircuits()))
 
     assert [entry.name for entry in entries] == ["canvas", "backend-1", "backend-2"]
     assert entries[0].version == "1.2.3 (sdk 0.9)"
@@ -208,10 +209,207 @@ def test_compile_backends_leaves_the_version_empty_on_a_failed_read(tmp_path, mo
     monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
     monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
 
-    entries = asyncio.run(compile_backends(config, "secret"))
+    entries = asyncio.run(compile_backends(config, "secret", ProbeCircuits()))
 
     assert entries[0].version == ""
     assert entries[0].active is False
+
+
+class FakeClock:
+    """A controllable monotonic clock for the retry schedule."""
+
+    def __init__(self):
+        self.value = 1000.0
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+def test_suspends_a_backend_after_three_timeout_probes(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    (tmp_path / "quadlet" / "agent-canvas-slot-1.container").write_text(
+        "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
+    )
+    clock = FakeClock()
+    circuits = ProbeCircuits(clock=clock, jitter=lambda: 1.0)
+
+    calls = []
+    failing = {"slot": True}
+
+    def handler(url, headers):
+        if ":18100" in url:
+            calls.append(url)
+            if failing["slot"]:
+                raise httpx.ReadTimeout("the read timed out")
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return True
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    timeout_error = "the health endpoint timed out: the read timed out"
+
+    # Two timeouts are two strikes: the probe still runs on every read.
+    for _ in range(2):
+        entries = asyncio.run(compile_backends(config, "secret", circuits))
+    slot = entries[1]
+    assert slot.healthy is False
+    assert slot.error == timeout_error
+    assert len(calls) == 2
+
+    # The third timeout suspends the probe.
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    slot = entries[1]
+    assert slot.healthy is False
+    assert slot.error == f"the health probe is suspended, next attempt in 5s: {timeout_error}"
+    assert len(calls) == 3
+
+    # A read before the retry time probes nothing.
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 3
+    assert "suspended" in entries[1].error
+
+    # The retry is due and still fails: the wait doubles.
+    clock.advance(5)
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 4
+    assert "next attempt in 10s" in entries[1].error
+
+    # A read before the doubled wait probes nothing either.
+    clock.advance(9)
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 4
+
+    # The retry after recovery rejoins the backend at once.
+    clock.advance(1)
+    failing["slot"] = False
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 5
+    assert entries[1].healthy is True
+    assert entries[1].error == ""
+
+    # The rejoined backend is probed again like an active one.
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 6
+
+
+def test_suspends_a_backend_immediately_on_a_refused_connection(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    (tmp_path / "quadlet" / "agent-canvas-slot-1.container").write_text(
+        "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
+    )
+    circuits = ProbeCircuits(jitter=lambda: 1.0)
+
+    calls = []
+
+    def handler(url, headers):
+        if ":18100" in url:
+            calls.append(url)
+            raise httpx.ConnectError("refused")
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return True
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+
+    assert entries[1].healthy is False
+    assert "the health endpoint is unreachable: refused" in entries[1].error
+    assert "suspended" in entries[1].error
+
+    # The second read carries the suspended answer without a probe.
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 1
+    assert "suspended" in entries[1].error
+
+
+def test_an_http_status_failure_never_suspends_the_probe(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    (tmp_path / "quadlet" / "agent-canvas-slot-1.container").write_text(
+        "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
+    )
+    circuits = ProbeCircuits(jitter=lambda: 1.0)
+
+    calls = []
+
+    def handler(url, headers):
+        if ":18100" in url:
+            calls.append(url)
+            return FakeResponse({}, status_code=503)
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return True
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    for _ in range(6):
+        entries = asyncio.run(compile_backends(config, "secret", circuits))
+
+    assert len(calls) == 6
+    assert entries[1].healthy is False
+    assert entries[1].error == "the health endpoint answered HTTP 503"
+
+
+def test_retry_backoff_doubles_up_to_the_cap():
+    assert retry_backoff_seconds(0) == 5.0
+    assert retry_backoff_seconds(1) == 10.0
+    assert retry_backoff_seconds(3) == 40.0
+    assert retry_backoff_seconds(4) == 60.0
+
+
+def test_retry_backoff_applies_the_jitter_band(monkeypatch):
+    seen = {}
+
+    def uniform(low, high):
+        seen["band"] = (low, high)
+        return 1.2
+
+    monkeypatch.setattr(probe.random, "uniform", uniform)
+    assert probe.default_jitter() == 1.2
+    assert seen["band"] == probe.RETRY_BACKOFF_JITTER
+
+
+def test_a_non_http_probe_failure_strikes_and_rejoins(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    (tmp_path / "quadlet" / "agent-canvas-slot-1.container").write_text(
+        "PublishPort=127.0.0.1:18100:8000\n", encoding="utf-8"
+    )
+    circuits = ProbeCircuits(jitter=lambda: 1.0)
+
+    calls = []
+
+    def handler(url, headers):
+        if ":18100" in url:
+            calls.append(url)
+            if len(calls) == 1:
+                raise ValueError("the probe failed")
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return True
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+
+    assert entries[1].healthy is False
+    assert entries[1].error == "the health probe failed: the probe failed"
+
+    # The released probe runs again, and the healthy answer rejoins the backend.
+    entries = asyncio.run(compile_backends(config, "secret", circuits))
+    assert len(calls) == 2
+    assert entries[1].healthy is True
 
 
 class CompletedProcess:

@@ -67,6 +67,16 @@ A backend that contributes no rows, because its health probe failed or its
 read failed, appears in `unavailable`. An empty page therefore never hides a
 deployment outage.
 
+The probe suspends a backend whose probe times out three times in a row: the
+probe stops running on every read and runs again on the reads that follow, on
+a schedule whose wait starts at 5 seconds, doubles per failed retry, is capped
+at 60 seconds, and is scaled by 0.8-1.2 jitter. An unnamed transport failure
+counts the same as a timeout; a refused connection suspends the probe at once,
+because the server answered nothing at its address; an HTTP status failure
+degrades the round without suspending the backend. A suspended backend rejoins
+the merge on the first healthy answer. The suspension is in-memory, so a
+restart of this service probes every backend again.
+
 ## Install and run
 
 The service needs Python 3.10 or newer.
@@ -162,12 +172,13 @@ The code models the deployment rules as data:
 src/openhands_discovery/
   api.py            routes, error bodies, fan-out orchestration
   auth.py           deployment key read and constant-time compare
-  backends.py       backend targets, probes, compiled backend list
+  backends.py       backend targets, compiled backend list
   cache.py          merged page cache with a fresh window and stale serving
   config.py         typed configuration
   conversations.py  conversation walk, cursor, merge
   index.py          sqlite conversation index behind the run chat lookup
   models.py         response models and backend roles
+  probe.py          health probes, failure classes, probe suspension
   runs.py           run scans, merge, chat projection
   upstream.py       shared upstream JSON read and the key header
   __main__.py       command line entry point and domain self-check

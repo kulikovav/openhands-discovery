@@ -2,7 +2,8 @@
 
 The inventory is compiled from the slot Quadlet units on every request, so a
 slot that is added, removed, or restarted is reported without a restart of this
-service.
+service. The probe itself and the suspension of a failing backend live in
+``probe``.
 """
 
 import asyncio
@@ -15,10 +16,9 @@ import httpx
 
 from .config import DiscoveryConfig
 from .models import BackendEntry, BackendRole, UnavailableBackend
+from .probe import PROBE_KIND_ERROR, PROBE_TIMEOUT_SECONDS, ProbeCircuits, probe_error, probe_health
 from .upstream import API_KEY_HEADER
 
-PROBE_TIMEOUT_SECONDS = 2
-HEALTH_PATH = "/health"
 SERVER_INFO_PATH = "/api/automation/server_info"
 
 PUBLISH_PORT_PATTERN = re.compile(r"^PublishPort=127\.0\.0\.1:(\d+):8000$")
@@ -143,18 +143,6 @@ async def unit_is_active(unit_name: str) -> bool:
     return await asyncio.to_thread(unit_is_active_sync, unit_name)
 
 
-async def probe_health(client: httpx.AsyncClient, port: int) -> tuple[bool, str]:
-    """Return (healthy, error). The health path answers without a key."""
-    url = f"http://127.0.0.1:{port}{HEALTH_PATH}"
-    try:
-        response = await client.get(url)
-    except httpx.HTTPError as error:
-        return False, f"the health endpoint is unreachable: {error}"
-    if response.status_code == 200:
-        return True, ""
-    return False, f"the health endpoint answered HTTP {response.status_code}"
-
-
 async def probe_version(client: httpx.AsyncClient, port: int, api_key: str) -> str:
     """Read the automation server version of the ingress deployment.
 
@@ -175,36 +163,71 @@ async def probe_version(client: httpx.AsyncClient, port: int, api_key: str) -> s
     return package or sdk
 
 
-async def compile_backends(config: DiscoveryConfig, api_key: str) -> list[BackendEntry]:
+async def compile_backends(
+    config: DiscoveryConfig,
+    api_key: str,
+    circuits: ProbeCircuits,
+) -> list[BackendEntry]:
     """Compile the backend list with the result of a live probe per backend.
 
     Probes run concurrently, so a dead backend costs one probe timeout, not one
-    per backend.
+    per backend. Every probe records its own answer or releases its in-flight
+    mark, so a read that is cancelled mid-walk leaves no backend silenced. A
+    suspended backend is probed only past its retry time, and a backend whose
+    probe is already running answers from its recorded entry, so a concurrent
+    read repeats no probe and counts no strike.
     """
     targets = build_targets(config)
+    probed_targets = [target for target in targets if circuits.due(target.name)]
+    for target in probed_targets:
+        circuits.begin(target.name)
+
     async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
-        health, active = await asyncio.gather(
-            asyncio.gather(*[probe_health(client, target.port) for target in targets]),
-            asyncio.gather(*[unit_is_active(target.unit) for target in targets]),
+
+        async def probe_one(target: BackendTarget) -> None:
+            try:
+                healthy, kind, error = await probe_health(client, target.port)
+            except asyncio.CancelledError:
+                circuits.release(target.name)
+                raise
+            except BaseException as error:
+                circuits.release(target.name)
+                circuits.record(
+                    target.name,
+                    False,
+                    PROBE_KIND_ERROR,
+                    probe_error("the health probe failed", error),
+                )
+                return
+            circuits.record(target.name, healthy, kind, error)
+
+        answers = await asyncio.gather(
+            *[unit_is_active(target.unit) for target in targets],
+            *[probe_one(target) for target in probed_targets],
+            return_exceptions=True,
         )
+        # Only the ingress reports a version, and only a healthy answer
+        # refreshes it; a suspended ingress answers no version.
         version = ""
-        for index, target in enumerate(targets):
-            if target.reports_version and health[index][0]:
-                version = await probe_version(client, target.port, api_key)
-                break
-    return [
-        BackendEntry(
-            name=target.name,
-            role=target.role,
-            url=target.url,
-            port=target.port,
-            active=active[index],
-            healthy=health[index][0],
-            version=version if target.reports_version else "",
-            error=health[index][1],
+        if targets and targets[0].reports_version and circuits.entry(targets[0].name)[0]:
+            version = await probe_version(client, targets[0].port, api_key)
+
+    entries = []
+    for index, target in enumerate(targets):
+        healthy, error = circuits.entry(target.name)
+        entries.append(
+            BackendEntry(
+                name=target.name,
+                role=target.role,
+                url=target.url,
+                port=target.port,
+                active=answers[index],
+                healthy=healthy,
+                version=version if target.reports_version else "",
+                error=error,
+            )
         )
-        for index, target in enumerate(targets)
-    ]
+    return entries
 
 
 def unavailable_backends(backends: list[BackendEntry], role: BackendRole | None) -> list[UnavailableBackend]:
