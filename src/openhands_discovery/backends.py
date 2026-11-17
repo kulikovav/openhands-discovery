@@ -127,15 +127,16 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
         targets.append(
             BackendTarget(
                 name=governed.name,
-                role=BackendRole.GOVERNED,
+                # The bridge schedules cloud agents on slot-role backends, and
+                # the governed server is one. The merge flag keeps its
+                # conversations out of the merged reads, as v1 requires.
+                role=BackendRole.SLOT,
                 url=f"{config.scheme}://{governed.public_host}",
                 port=governed.port,
                 probe_host=governed.probe_host,
                 # A governed backend runs on another host, so the service
                 # cannot read its unit. The health probe is its only state.
                 unit=None,
-                # The v1 plan keeps governed conversations out of the merged
-                # reads; the entry stays in the backend list for scheduling.
                 merge=False,
             )
         )

@@ -169,7 +169,7 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
 
 def test_conversations_leaves_the_governed_backend_out_of_the_merge(tmp_path, monkeypatch):
     ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
-    governed = make_backend("openshell", BackendRole.GOVERNED, 18020).model_copy(
+    governed = make_backend("openshell", BackendRole.SLOT, 18020).model_copy(
         update={"merge": False}
     )
 

@@ -6,7 +6,7 @@ The service runs on the deployment host. It compiles the list of OpenHands
 backends and merges the deployment's list-shaped reads. The bridge reads this
 service instead of fanning out to every backend itself.
 
-The backend list has four roles, and each carries a configurable display name:
+The backend list has three roles, and each carries a configurable display name:
 
 - `ingress`: the ingress container, named `canvas` by default. It serves the
   automation API.
@@ -15,10 +15,12 @@ The backend list has four roles, and each carries a configurable display name:
 - `automations`: the server that owns the conversations of automation runs,
   named `automation-runs` by default. The bridge reads transcripts here and
   never schedules here.
-- `governed`: the governed agent server that runs conversations in OpenShell
-  sandboxes, named `governed` by default. It runs on another host, so its
-  `active` state comes from its health probe. Its conversations stay out of the
-  merged reads in v1, and its entry carries `merge: false` to say so.
+
+A deployment can also publish one governed backend. It runs on its own host and
+takes cloud-agent starts, so its entry carries the `slot` role and a configured
+display name. It sets `merge: false`, because the v1 plan keeps governed
+conversations out of the merged reads. Its `active` state comes from its health
+probe, since the service cannot read a unit on another host.
 
 The service listens on `127.0.0.1` only. nginx publishes the
 `/api/discovery/` paths on the deployment TLS port. Every path except
@@ -143,7 +145,7 @@ index rules hold.
 | `index_path` | The file of the sqlite conversation index that backs the run chat lookup. Optional; without it every chat read walks the conversation search. A file the service cannot open disables the index, with a warning in the service log, and the reads walk. |
 | `slot_name_prefix` | Prefix of a slot's display name, followed by its number. Default is `backend-`. |
 | `slot_public_host_prefix` | The public host name prefix of the cloud-agent slots. Slot N answers on `<prefix>N.<domain>`. |
-| `governed` | The governed backend, when the deployment runs one. The block needs `port`, `probe_host`, and `public_host`; `name` defaults to `governed`. The probe dials `probe_host` because the server runs on another host, and its conversations stay out of the merged reads. |
+| `governed` | The governed backend, when the deployment runs one. The block needs `port`, `probe_host`, and `public_host`; `name` defaults to `governed`. The entry carries the `slot` role so the bridge schedules cloud agents there, and `merge: false` keeps its conversations out of the merged reads. The probe dials `probe_host` because the server runs on another host. |
 
 The runs backend is present only when both `runs_port` and `runs_public_host`
 are set. The governed backend is present only when `governed` is set.
@@ -154,9 +156,9 @@ The code models the deployment rules as data:
 
 - `backends.BackendTarget` holds every value a probe needs, including whether
   the role reports a version and the host to dial. `build_targets` compiles the
-  fixed order: ingress, slots, runs, governed. A governed target carries
-  `merge=False`, so the merged reads skip it while the backend route publishes
-  it.
+  fixed order: ingress, slots, runs, governed. The governed target carries the
+  slot role and `merge=False`, so the merged reads skip it while the backend
+  route publishes it for scheduling.
 - `runs.RunScan` is the scan strategy of one request. `NewestRuns`,
   `ChatRuns`, and `SingleRun` implement it. `select_scan` holds the precedence
   rule in one place.

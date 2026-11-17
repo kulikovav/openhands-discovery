@@ -12,7 +12,6 @@ class BackendRole(str, Enum):
     INGRESS = "ingress"
     SLOT = "slot"
     AUTOMATIONS = "automations"
-    GOVERNED = "governed"
 
 
 class BackendEntry(BaseModel):
@@ -26,10 +25,9 @@ class BackendEntry(BaseModel):
     healthy: bool
     version: str = ""
     error: str = ""
-    # A governed backend serves conversations through its sandbox runtime, so
-    # the v1 plan keeps its conversations out of the merged reads. The entry
-    # stays in the backend list, because the bridge schedules cloud agents from
-    # that list.
+    # A governed backend takes cloud-agent starts like a slot, so it carries
+    # the slot role. The v1 plan keeps its conversations out of the merged
+    # reads, so the entry sets this flag to false.
     merge: bool = True
 
 

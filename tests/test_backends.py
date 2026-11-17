@@ -121,7 +121,7 @@ def test_build_targets_appends_the_governed_backend_last(tmp_path):
     governed = build_targets(config)[-1]
 
     assert governed.name == "openshell"
-    assert governed.role is BackendRole.GOVERNED
+    assert governed.role is BackendRole.SLOT
     assert governed.url == "https://g1.oh.example"
     assert governed.port == 18020
     assert governed.probe_host == "100.125.59.93"
@@ -149,7 +149,7 @@ def test_compile_backends_probes_the_governed_backend_on_its_tailnet_address(
 
     governed = entries[-1]
     assert "http://100.125.59.93:18020/health" in urls
-    assert governed.role is BackendRole.GOVERNED
+    assert governed.role is BackendRole.SLOT
     assert governed.active is True
     assert governed.healthy is True
     assert governed.merge is False
@@ -158,7 +158,7 @@ def test_compile_backends_probes_the_governed_backend_on_its_tailnet_address(
 def test_unavailable_backends_skips_a_backend_outside_the_merge():
     governed = BackendEntry(
         name="openshell",
-        role=BackendRole.GOVERNED,
+        role=BackendRole.SLOT,
         url="https://g1.oh.example",
         port=18020,
         active=False,
