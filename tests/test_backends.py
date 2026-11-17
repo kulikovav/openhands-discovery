@@ -107,6 +107,69 @@ def test_build_targets_skips_the_runs_server_when_a_key_is_missing(tmp_path):
     assert [target.name for target in build_targets(config)] == ["canvas"]
 
 
+GOVERNED = {
+    "name": "openshell",
+    "port": 18020,
+    "probe_host": "100.125.59.93",
+    "public_host": "g1.oh.example",
+}
+
+
+def test_build_targets_appends_the_governed_backend_last(tmp_path):
+    config = make_config(tmp_path, governed=GOVERNED)
+
+    governed = build_targets(config)[-1]
+
+    assert governed.name == "openshell"
+    assert governed.role is BackendRole.GOVERNED
+    assert governed.url == "https://g1.oh.example"
+    assert governed.port == 18020
+    assert governed.probe_host == "100.125.59.93"
+    assert governed.unit is None
+    assert governed.merge is False
+
+
+def test_compile_backends_probes_the_governed_backend_on_its_tailnet_address(
+    tmp_path, monkeypatch
+):
+    config = make_config(tmp_path, governed=GOVERNED)
+    urls = []
+
+    def handler(url, headers):
+        urls.append(url)
+        return FakeResponse({})
+
+    async def fake_unit_is_active(unit_name):
+        return True
+
+    monkeypatch.setattr(backends, "unit_is_active", fake_unit_is_active)
+    monkeypatch.setattr(backends.httpx, "AsyncClient", lambda timeout: FakeClient(handler))
+
+    entries = asyncio.run(compile_backends(config, "secret", ProbeCircuits()))
+
+    governed = entries[-1]
+    assert "http://100.125.59.93:18020/health" in urls
+    assert governed.role is BackendRole.GOVERNED
+    assert governed.active is True
+    assert governed.healthy is True
+    assert governed.merge is False
+
+
+def test_unavailable_backends_skips_a_backend_outside_the_merge():
+    governed = BackendEntry(
+        name="openshell",
+        role=BackendRole.GOVERNED,
+        url="https://g1.oh.example",
+        port=18020,
+        active=False,
+        healthy=False,
+        error="the health endpoint is unreachable",
+        merge=False,
+    )
+
+    assert unavailable_backends([governed], None) == []
+
+
 def test_unavailable_backends_filters_by_role():
     ingress = BackendEntry(
         name="canvas",

@@ -31,15 +31,20 @@ class BackendTarget:
 
     ``reports_version`` encodes the one difference between the roles: a slot
     runs the agent server alone and serves no automation API, so only the
-    ingress reports a version.
+    ingress reports a version. ``probe_host`` is loopback for a local backend
+    and the tailnet address for the governed backend, which runs on another
+    host. ``unit`` is empty for that backend too, so its ``active`` state comes
+    from the health probe.
     """
 
     name: str
     role: BackendRole
     url: str
     port: int
-    unit: str
+    unit: str | None = None
     reports_version: bool = False
+    probe_host: str = "127.0.0.1"
+    merge: bool = True
 
 
 def read_publish_port(unit_path: str) -> int | None:
@@ -117,6 +122,23 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
                 unit="agent-canvas-runs.service",
             )
         )
+    if config.governed is not None:
+        governed = config.governed
+        targets.append(
+            BackendTarget(
+                name=governed.name,
+                role=BackendRole.GOVERNED,
+                url=f"{config.scheme}://{governed.public_host}",
+                port=governed.port,
+                probe_host=governed.probe_host,
+                # A governed backend runs on another host, so the service
+                # cannot read its unit. The health probe is its only state.
+                unit=None,
+                # The v1 plan keeps governed conversations out of the merged
+                # reads; the entry stays in the backend list for scheduling.
+                merge=False,
+            )
+        )
     return targets
 
 
@@ -186,7 +208,9 @@ async def compile_backends(
 
         async def probe_one(target: BackendTarget) -> None:
             try:
-                healthy, kind, error = await probe_health(client, target.port)
+                healthy, kind, error = await probe_health(
+                    client, target.probe_host, target.port
+                )
             except asyncio.CancelledError:
                 circuits.release(target.name)
                 raise
@@ -201,8 +225,14 @@ async def compile_backends(
                 return
             circuits.record(target.name, healthy, kind, error)
 
+        async def target_is_active(target: BackendTarget) -> bool:
+            """A governed backend has no local unit, so it is never active here."""
+            if target.unit is None:
+                return False
+            return await unit_is_active(target.unit)
+
         answers = await asyncio.gather(
-            *[unit_is_active(target.unit) for target in targets],
+            *[target_is_active(target) for target in targets],
             *[probe_one(target) for target in probed_targets],
             return_exceptions=True,
         )
@@ -221,10 +251,13 @@ async def compile_backends(
                 role=target.role,
                 url=target.url,
                 port=target.port,
-                active=answers[index],
+                # A governed backend has no local unit to read, so its health
+                # probe is the active state.
+                active=answers[index] if target.unit is not None else healthy,
                 healthy=healthy,
                 version=version if target.reports_version else "",
                 error=error,
+                merge=target.merge,
             )
         )
     return entries
@@ -237,7 +270,9 @@ def unavailable_backends(backends: list[BackendEntry], role: BackendRole | None)
     They are reported like a failed read, so a caller that reads an empty page
     can tell a deployment outage from a user who owns nothing. The role filter
     of the request applies here too, so a narrowed walk reports only the
-    backends it would have read.
+    backends it would have read. A backend outside the merge (the governed
+    backend in v1) contributes no rows by design, so a failed probe is not
+    reported as an outage.
     """
     return [
         UnavailableBackend(
@@ -246,5 +281,7 @@ def unavailable_backends(backends: list[BackendEntry], role: BackendRole | None)
             error=backend.error or "the health probe failed",
         )
         for backend in backends
-        if not backend.healthy and (role is None or backend.role == role)
+        if backend.merge
+        and not backend.healthy
+        and (role is None or backend.role == role)
     ]

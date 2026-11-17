@@ -49,6 +49,29 @@ def test_load_config_reads_the_index_path(tmp_path):
     assert config.index_path == path
 
 
+def test_load_config_reads_the_governed_backend(tmp_path):
+    config = load_config(
+        write_config(
+            tmp_path,
+            governed={
+                "name": "openshell",
+                "port": 18020,
+                "probe_host": "100.125.59.93",
+                "public_host": "g1.oh.example",
+            },
+        )
+    )
+
+    assert config.governed_configured is True
+    assert config.governed.name == "openshell"
+    assert config.governed.port == 18020
+
+
+def test_load_config_rejects_an_incomplete_governed_block(tmp_path):
+    with pytest.raises(ValidationError):
+        load_config(write_config(tmp_path, governed={"name": "openshell"}))
+
+
 def test_load_config_rejects_a_missing_key(tmp_path):
     path = write_config(tmp_path)
     data = json.loads(path.read_text(encoding="utf-8"))

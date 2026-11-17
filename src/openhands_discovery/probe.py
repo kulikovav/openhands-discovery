@@ -45,14 +45,16 @@ PROBE_KIND_STATUS = "status"
 PROBE_KIND_ERROR = "error"
 
 
-async def probe_health(client: httpx.AsyncClient, port: int) -> tuple[bool, str, str]:
+async def probe_health(
+    client: httpx.AsyncClient, host: str, port: int
+) -> tuple[bool, str, str]:
     """Return (healthy, kind, error). The health path answers without a key.
 
     The kind names the failure class the suspension state machine reads: a
     timeout and the unnamed transport errors are ambiguous, a refusal proves
     the backend is down, and an HTTP status failure proves it is listening.
     """
-    url = f"http://127.0.0.1:{port}{HEALTH_PATH}"
+    url = f"http://{host}:{port}{HEALTH_PATH}"
     try:
         response = await client.get(url)
     except httpx.TimeoutException as error:

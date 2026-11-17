@@ -8,6 +8,23 @@ from pydantic import BaseModel, ConfigDict, Field
 DEFAULT_CONFIG_PATH = "/etc/agent-canvas/discovery.json"
 
 
+class GovernedBackendConfig(BaseModel):
+    """A governed backend that runs on another host.
+
+    The service runs on the ingress host, so it cannot read the governed
+    server's unit or reach its loopback address. The public host names the
+    address the bridge uses, and the probe host names the tailnet address the
+    health probe dials.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(default="governed", min_length=1)
+    port: int = Field(ge=1, le=65535)
+    probe_host: str = Field(min_length=1)
+    public_host: str = Field(min_length=1)
+
+
 class DiscoveryConfig(BaseModel):
     """The deployment settings, read once at start.
 
@@ -17,6 +34,10 @@ class DiscoveryConfig(BaseModel):
     The backend names are display identifiers, because the bridge selects a
     backend by its role. The deployment can rename them; a document from before
     they were configurable keeps the defaults.
+
+    ``governed`` is optional: a deployment that publishes a governed backend
+    adds its entry to the backend list. Its conversations stay out of the
+    merged reads in v1.
 
     ``index_path`` is optional: the sqlite conversation index stays disabled
     while the key is unset, and a chat read then walks the conversation search,
@@ -37,6 +58,7 @@ class DiscoveryConfig(BaseModel):
     scheme: str = "https"
     runs_port: int | None = None
     runs_public_host: str | None = None
+    governed: GovernedBackendConfig | None = None
     index_path: str | None = None
 
     @property
@@ -48,6 +70,11 @@ class DiscoveryConfig(BaseModel):
     def runs_configured(self) -> bool:
         """Whether the automation runs server is part of the deployment."""
         return self.runs_port is not None and self.runs_public_host is not None
+
+    @property
+    def governed_configured(self) -> bool:
+        """Whether a governed backend is part of the deployment."""
+        return self.governed is not None
 
 
 def load_config(path: str | Path) -> DiscoveryConfig:

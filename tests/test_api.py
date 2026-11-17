@@ -91,6 +91,7 @@ def test_backends_returns_the_compiled_list(tmp_path, monkeypatch):
                 "healthy": True,
                 "version": "",
                 "error": "",
+                "merge": True,
             }
         ]
     }
@@ -164,6 +165,35 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
             "error": "the search page answered HTTP 500",
         },
     ]
+
+
+def test_conversations_leaves_the_governed_backend_out_of_the_merge(tmp_path, monkeypatch):
+    ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
+    governed = make_backend("openshell", BackendRole.GOVERNED, 18020).model_copy(
+        update={"merge": False}
+    )
+
+    async def fake_compile(config, api_key, circuits):
+        return [ingress, governed]
+
+    async def fake_walk(client, backends, api_key, limit, cursors):
+        assert [backend.name for backend in backends] == ["canvas"]
+        return ConversationWalk(conversations=[], next_page_id=None, unavailable=[])
+
+    monkeypatch.setattr(api, "compile_backends", fake_compile)
+    monkeypatch.setattr(api, "read_walk", fake_walk)
+    response = get(
+        api.create_app(make_config(tmp_path)),
+        "/api/discovery/conversations",
+        headers=key_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "conversations": [],
+        "next_page_id": None,
+        "unavailable": [],
+    }
 
 
 def test_runs_maps_an_upstream_client_error(tmp_path, monkeypatch):

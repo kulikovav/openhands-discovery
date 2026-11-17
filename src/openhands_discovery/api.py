@@ -124,7 +124,11 @@ async def merged_page(
         circuits: ProbeCircuits = request.app.state.probe_circuits
         backends = await compile_backends(config, api_key, circuits)
         candidates = [
-            backend for backend in backends if backend.healthy and (role is None or backend.role == role)
+            backend
+            for backend in backends
+            if backend.healthy
+            and backend.merge
+            and (role is None or backend.role == role)
         ]
         unavailable = unavailable_backends(backends, role)
 
