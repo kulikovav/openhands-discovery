@@ -175,3 +175,33 @@ def test_read_walk_merges_pages_and_reports_a_failed_read():
     assert second.next_page_id is None
     assert sorted(requested_ports[:3]) == [8000, 18100, 18101]
     assert requested_ports[3:] == [8000]
+
+
+def test_read_walk_dials_the_governed_backend_on_its_own_host():
+    governed = BackendEntry(
+        name="openshell",
+        role=BackendRole.SLOT,
+        url="https://g1.oh.example",
+        port=18020,
+        host="100.125.59.93",
+        active=True,
+        healthy=True,
+    )
+    requested = []
+
+    def handler(request):
+        requested.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "361f4ac9", "updated_at": "2026-11-25T18:15:41Z"}], "next_page_id": None},
+            request=request,
+        )
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await read_walk(client, [governed], "key", 100, {})
+
+    walk = asyncio.run(run())
+
+    assert requested == ["http://100.125.59.93:18020/api/conversations/search?limit=100"]
+    assert [row["id"] for row in walk.conversations] == ["361f4ac9"]

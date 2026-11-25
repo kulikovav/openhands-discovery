@@ -5,7 +5,7 @@ import httpx
 from openhands_discovery import backends, probe
 from openhands_discovery.backends import build_targets, compile_backends, slot_ports, unavailable_backends
 from openhands_discovery.config import DiscoveryConfig
-from openhands_discovery.models import BackendEntry, BackendRole
+from openhands_discovery.models import BackendEntry, BackendRole, UnavailableBackend
 from openhands_discovery.probe import ProbeCircuits, retry_backoff_seconds
 
 
@@ -126,7 +126,7 @@ def test_build_targets_appends_the_governed_backend_last(tmp_path):
     assert governed.port == 18020
     assert governed.probe_host == "100.125.59.93"
     assert governed.unit is None
-    assert governed.merge is False
+    assert governed.merge is True
 
 
 def test_compile_backends_probes_the_governed_backend_on_its_tailnet_address(
@@ -152,11 +152,12 @@ def test_compile_backends_probes_the_governed_backend_on_its_tailnet_address(
     assert governed.role is BackendRole.SLOT
     assert governed.active is True
     assert governed.healthy is True
-    assert governed.merge is False
+    assert governed.host == "100.125.59.93"
+    assert governed.merge is True
 
 
 def test_unavailable_backends_skips_a_backend_outside_the_merge():
-    governed = BackendEntry(
+    offline = BackendEntry(
         name="openshell",
         role=BackendRole.SLOT,
         url="https://g1.oh.example",
@@ -167,7 +168,27 @@ def test_unavailable_backends_skips_a_backend_outside_the_merge():
         merge=False,
     )
 
-    assert unavailable_backends([governed], None) == []
+    assert unavailable_backends([offline], None) == []
+
+
+def test_unavailable_backends_reports_a_governed_backend_outside_the_merge():
+    governed = BackendEntry(
+        name="openshell",
+        role=BackendRole.SLOT,
+        url="https://g1.oh.example",
+        port=18020,
+        active=False,
+        healthy=False,
+        error="the health endpoint is unreachable",
+    )
+
+    assert unavailable_backends([governed], None) == [
+        UnavailableBackend(
+            name="openshell",
+            role=BackendRole.SLOT,
+            error="the health endpoint is unreachable",
+        )
+    ]
 
 
 def test_unavailable_backends_filters_by_role():

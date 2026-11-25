@@ -167,18 +167,27 @@ def test_conversations_reports_health_failures_then_read_failures(tmp_path, monk
     ]
 
 
-def test_conversations_leaves_the_governed_backend_out_of_the_merge(tmp_path, monkeypatch):
+def test_conversations_merges_the_governed_backend(tmp_path, monkeypatch):
     ingress = make_backend("canvas", BackendRole.INGRESS, 8000)
-    governed = make_backend("openshell", BackendRole.SLOT, 18020).model_copy(
-        update={"merge": False}
-    )
+    governed = make_backend("openshell", BackendRole.SLOT, 18020)
 
     async def fake_compile(config, api_key, circuits):
         return [ingress, governed]
 
     async def fake_walk(client, backends, api_key, limit, cursors):
-        assert [backend.name for backend in backends] == ["canvas"]
-        return ConversationWalk(conversations=[], next_page_id=None, unavailable=[])
+        assert [backend.name for backend in backends] == ["canvas", "openshell"]
+        return ConversationWalk(
+            conversations=[
+                {
+                    "id": "361f4ac9-a9c0-4f46-b3b8-0548be28246c",
+                    "title": "Bump Netbox version",
+                    "tags": {"bridgemode": "cloudagent"},
+                    "backend": {"name": "openshell", "role": "slot", "url": governed.url},
+                }
+            ],
+            next_page_id=None,
+            unavailable=[],
+        )
 
     monkeypatch.setattr(api, "compile_backends", fake_compile)
     monkeypatch.setattr(api, "read_walk", fake_walk)
@@ -189,11 +198,10 @@ def test_conversations_leaves_the_governed_backend_out_of_the_merge(tmp_path, mo
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "conversations": [],
-        "next_page_id": None,
-        "unavailable": [],
-    }
+    assert [row["id"] for row in response.json()["conversations"]] == [
+        "361f4ac9-a9c0-4f46-b3b8-0548be28246c"
+    ]
+    assert response.json()["conversations"][0]["backend"]["name"] == "openshell"
 
 
 def test_runs_maps_an_upstream_client_error(tmp_path, monkeypatch):
