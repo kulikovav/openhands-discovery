@@ -128,8 +128,8 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
             BackendTarget(
                 name=governed.name,
                 # The bridge schedules cloud agents on slot-role backends, and
-                # the governed server is one. The merge flag keeps its
-                # conversations out of the merged reads, as v1 requires.
+                # the governed server is one. Its conversations read like any
+                # other backend's, so the entry merges.
                 role=BackendRole.SLOT,
                 url=f"{config.scheme}://{governed.public_host}",
                 port=governed.port,
@@ -137,7 +137,6 @@ def build_targets(config: DiscoveryConfig) -> list[BackendTarget]:
                 # A governed backend runs on another host, so the service
                 # cannot read its unit. The health probe is its only state.
                 unit=None,
-                merge=False,
             )
         )
     return targets
@@ -259,6 +258,7 @@ async def compile_backends(
                 version=version if target.reports_version else "",
                 error=error,
                 merge=target.merge,
+                host=target.probe_host,
             )
         )
     return entries
@@ -271,9 +271,7 @@ def unavailable_backends(backends: list[BackendEntry], role: BackendRole | None)
     They are reported like a failed read, so a caller that reads an empty page
     can tell a deployment outage from a user who owns nothing. The role filter
     of the request applies here too, so a narrowed walk reports only the
-    backends it would have read. A backend outside the merge (the governed
-    backend in v1) contributes no rows by design, so a failed probe is not
-    reported as an outage.
+    backends it would have read.
     """
     return [
         UnavailableBackend(

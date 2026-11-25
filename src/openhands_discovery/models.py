@@ -21,13 +21,17 @@ class BackendEntry(BaseModel):
     role: BackendRole
     url: str
     port: int
+    # The host the merged reads dial. It is loopback for a local backend and
+    # the tailnet address for a governed backend, which runs on another host.
+    # It never leaves the service: the bridge addresses a backend by its URL.
+    host: str = Field(default="127.0.0.1", exclude=True)
     active: bool
     healthy: bool
     version: str = ""
     error: str = ""
-    # A governed backend takes cloud-agent starts like a slot, so it carries
-    # the slot role. The v1 plan keeps its conversations out of the merged
-    # reads, so the entry sets this flag to false.
+    # A governed backend takes cloud-agent starts like a slot and its
+    # conversations read like any other backend's, so it carries the slot role
+    # and merges.
     merge: bool = True
 
 
