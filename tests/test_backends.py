@@ -171,7 +171,7 @@ def test_unavailable_backends_skips_a_backend_outside_the_merge():
     assert unavailable_backends([offline], None) == []
 
 
-def test_unavailable_backends_reports_a_governed_backend_outside_the_merge():
+def test_unavailable_backends_reports_an_unhealthy_governed_backend():
     governed = BackendEntry(
         name="openshell",
         role=BackendRole.SLOT,
