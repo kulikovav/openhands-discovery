@@ -37,8 +37,7 @@ class DiscoveryConfig(BaseModel):
 
     ``governed`` is optional: a deployment that publishes a governed backend
     adds its entry to the backend list. The entry merges like any other
-    backend, so its conversations and automation runs appear in the merged
-    reads.
+    backend, so its conversations appear in the merged conversation read.
 
     ``index_path`` is optional: the sqlite conversation index stays disabled
     while the key is unset, and a chat read then walks the conversation search,
