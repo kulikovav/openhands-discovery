@@ -18,9 +18,10 @@ The backend list has three roles, and each carries a configurable display name:
 
 A deployment can also publish one governed backend. It runs on its own host and
 takes cloud-agent starts, so its entry carries the `slot` role and a configured
-display name. It sets `merge: false`, because the v1 plan keeps governed
-conversations out of the merged reads. Its `active` state comes from its health
-probe, since the service cannot read a unit on another host.
+display name. Its conversations merge like every other backend's, and the
+service dials it on its own host (`probe_host`), not on the loopback of the
+deployment host. Its `active` state comes from its health probe, since the
+service cannot read a unit on another host.
 
 The service listens on `127.0.0.1` only. nginx publishes the
 `/api/discovery/` paths on the deployment TLS port. Every path except
@@ -145,7 +146,7 @@ index rules hold.
 | `index_path` | The file of the sqlite conversation index that backs the run chat lookup. Optional; without it every chat read walks the conversation search. A file the service cannot open disables the index, with a warning in the service log, and the reads walk. |
 | `slot_name_prefix` | Prefix of a slot's display name, followed by its number. Default is `backend-`. |
 | `slot_public_host_prefix` | The public host name prefix of the cloud-agent slots. Slot N answers on `<prefix>N.<domain>`. |
-| `governed` | The governed backend, when the deployment runs one. The block needs `port`, `probe_host`, and `public_host`; `name` defaults to `governed`. The entry carries the `slot` role so the bridge schedules cloud agents there, and `merge: false` keeps its conversations out of the merged reads. The probe dials `probe_host` because the server runs on another host. |
+| `governed` | The governed backend, when the deployment runs one. The block needs `port`, `probe_host`, and `public_host`; `name` defaults to `governed`. The entry carries the `slot` role so the bridge schedules cloud agents there, and it merges like every other backend: the probe and the merged reads dial `probe_host`, because the server runs on another host. |
 
 The runs backend is present only when both `runs_port` and `runs_public_host`
 are set. The governed backend is present only when `governed` is set.

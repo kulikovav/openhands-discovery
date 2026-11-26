@@ -142,7 +142,7 @@ async def fetch_conversation_page(
     params: dict[str, Any] = {"limit": limit}
     if page_id:
         params["page_id"] = page_id
-    url = f"http://127.0.0.1:{backend.port}{CONVERSATION_SEARCH_PATH}"
+    url = f"http://{backend.host}:{backend.port}{CONVERSATION_SEARCH_PATH}"
     return ConversationPage.from_payload(await fetch_json(client, url, api_key, params))
 
 
